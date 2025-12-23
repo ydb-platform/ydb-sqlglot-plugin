@@ -27,20 +27,12 @@ print(result)
 parsed = sqlglot.parse_one("SELECT * FROM `users`", dialect="ydb")
 print(parsed.sql(dialect="ydb"))
 
-# Convert Oracle-style joins to YDB
-oracle_sql = "SELECT * FROM a, b WHERE a.id = b.id(+)"
-ydb_sql = sqlglot.transpile(oracle_sql, read="oracle", write="ydb")[0]
-print(ydb_sql)
-# Output: SELECT * FROM `b` LEFT JOIN `a` ON a.id = b.id
-```
-
 ## Features
 
 - **Table name escaping**: Table names are automatically wrapped in backticks
 - **CTE to variables**: Common Table Expressions are converted to YDB-style variables (`$name = (...)`)
 - **Date/Time functions**: Proper mapping of date/time functions to YDB's DateTime module
 - **Type mapping**: SQL types are mapped to YDB-specific types (e.g., `VARCHAR` → `Utf8`, `INT` → `INT32`)
-- **Oracle join marks**: Oracle-style `(+)` join marks are converted to proper JOIN syntax
 - **Subquery decorrelation**: Correlated subqueries are transformed into JOINs for better YDB compatibility
 - **Lambda expressions**: Support for YDB-style lambda expressions in array operations
 
