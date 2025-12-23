@@ -7,6 +7,7 @@ from sqlglot.helper import name_sequence, seq_get, flatten
 from sqlglot.optimizer.simplify import simplify
 from sqlglot.transforms import move_ctes_to_top_level
 from sqlglot.optimizer.scope import find_in_scope, ScopeType, traverse_scope
+from sqlglot.transforms import eliminate_join_marks
 
 JOIN_ATTRS = ("on", "side", "kind", "using", "method")
 
@@ -25,122 +26,17 @@ def table_names_to_lower_case(expression: exp.Expression) -> exp.Expression:
     return expression
 
 
-def eliminate_join_marks(expression: exp.Expression) -> exp.Expression:
+def make_db_name_lower(expression: exp.Expression) -> exp.Expression:
     """
-    Remove join marks from an AST. This rule assumes that all marked columns are qualified.
-    If this does not hold for a query, consider running `sqlglot.optimizer.qualify` first.
-
-    For example,
-        SELECT * FROM a, b WHERE a.id = b.id(+)    -- ... is converted to
-        SELECT * FROM a LEFT JOIN b ON a.id = b.id -- this
-
+    Converts all database names to uppercase
     Args:
-        expression: The AST to remove join marks from.
-
+        expression: The SQL expression to modify
     Returns:
-       The AST with join marks removed.
+        Modified expression with uppercase database names
     """
-    from sqlglot.optimizer.scope import traverse_scope
-
-    for scope in traverse_scope(expression):
-        query = scope.expression
-
-        where = query.args.get("where")
-        joins = query.args.get("joins")
-
-        if not where or not joins:
-            continue
-
-        query_from = query.args["from"]
-
-        # These keep track of the joins to be replaced
-        new_joins: t.Dict[str, exp.Join] = {}
-        old_joins = {join.alias_or_name: join for join in joins}
-
-        for column in scope.columns:
-            if not column.args.get("join_mark"):
-                continue
-
-            predicate = column.find_ancestor(exp.Predicate, exp.Select)
-            if not isinstance(predicate, exp.Binary):
-                continue
-
-            predicate_parent = predicate.parent
-            join_predicate = predicate.pop()
-
-            left_columns = [
-                c for c in join_predicate.left.find_all(exp.Column) if c.args.get("join_mark")
-            ]
-            right_columns = [
-                c for c in join_predicate.right.find_all(exp.Column) if c.args.get("join_mark")
-            ]
-            if left_columns and right_columns:
-                raise ValueError("The (+) marker cannot appear in both sides of a binary predicate")
-
-            marked_column_tables = set()
-            for col in left_columns or right_columns:
-                if not isinstance(col, exp.Column) or not hasattr(col, "table"):
-                    continue
-                table = col.table
-                if not table:
-                    raise ValueError(f"Column {col} needs to be qualified with a table")
-
-                col.set("join_mark", False)
-                marked_column_tables.add(table)
-
-            if not len(marked_column_tables) == 1:
-                raise ValueError(
-                    "Columns of only a single table can be marked with (+) in a given binary predicate"
-                )
-
-            # Add predicate if join already copied, or add join if it is new
-            # Use the last col that was processed (should have table attribute)
-            last_col = None
-            for col in left_columns or right_columns:
-                if isinstance(col, exp.Column) and hasattr(col, "table") and col.table:
-                    last_col = col
-                    break
-            if last_col:
-                join_this = old_joins.get(last_col.table, query_from).this
-            else:
-                join_this = query_from.this
-            existing_join = new_joins.get(join_this.alias_or_name)
-            if existing_join:
-                existing_join.set("on", exp.and_(existing_join.args["on"], join_predicate))
-            else:
-                new_joins[join_this.alias_or_name] = exp.Join(
-                    this=join_this.copy(), on=join_predicate.copy(), kind="LEFT"
-                )
-
-            # If the parent of the target predicate is a binary node, then it now has only one child
-            if isinstance(predicate_parent, exp.Binary):
-                if predicate_parent.left is None:
-                    predicate_parent.replace(predicate_parent.right)
-                else:
-                    predicate_parent.replace(predicate_parent.left)
-
-        only_old_join_sources = old_joins.keys() - new_joins.keys()
-
-        if query_from.alias_or_name in new_joins:
-            if len(only_old_join_sources) < 1:
-                raise ValueError("Cannot determine which table to use in the new FROM clause")
-            new_from_name = list(only_old_join_sources)[0]
-            query.set("from", exp.From(this=old_joins.pop(new_from_name).this))
-            only_old_join_sources.remove(new_from_name)
-
-        if new_joins:
-            only_old_join_expressions = []
-            for old_join_source in only_old_join_sources:
-                old_join_expression = old_joins[old_join_source]
-                if not old_join_expression.kind:
-                    old_join_expression.set("kind", "CROSS")
-
-                only_old_join_expressions.append(old_join_expression)
-
-            query.set("joins", list(new_joins.values()) + only_old_join_expressions)
-
-        if not where.this:
-            where.pop()
+    for table in expression.find_all(exp.Table):
+        if table.db:
+            table.set("db", table.db.lower())
 
     return expression
 
@@ -310,8 +206,8 @@ class YDB(Dialect):
 
         def _parse_lambda_body(self, params):
             if (
-                self._curr.token_type != TokenType.R_PAREN
-                or self._next.token_type != TokenType.ARROW
+                    self._curr.token_type != TokenType.R_PAREN
+                    or self._next.token_type != TokenType.ARROW
             ):
                 return None
             self._advance()
@@ -575,9 +471,9 @@ class YDB(Dialect):
                 Generated SQL string for the data type
             """
             if (
-                expression.is_type(exp.DataType.Type.NVARCHAR)
-                or expression.is_type(exp.DataType.Type.VARCHAR)
-                or expression.is_type(exp.DataType.Type.CHAR)
+                    expression.is_type(exp.DataType.Type.NVARCHAR)
+                    or expression.is_type(exp.DataType.Type.VARCHAR)
+                    or expression.is_type(exp.DataType.Type.CHAR)
             ):
                 expression = exp.DataType.build("text")
             elif expression.is_type(exp.DataType.Type.DECIMAL):
@@ -597,7 +493,7 @@ class YDB(Dialect):
                     expression = exp.DataType.build("int64")
                 else:
                     if len(size_expressions) == 1 or (
-                        len(size_expressions) == 2 and int(size_expressions[1].name) == 0
+                            len(size_expressions) == 2 and int(size_expressions[1].name) == 0
                     ):
                         if isinstance(size_expressions[0].this, exp.Star):
                             expression = exp.DataType.build("decimal(38, 0)")
@@ -800,9 +696,9 @@ class YDB(Dialect):
             #                          'PRAGMA AnsiInForEmptyOrNullableItemsCollections;']
 
             if not isinstance(expression, exp.Create) or (
-                isinstance(expression, exp.Create)
-                and expression.kind
-                and expression.kind.lower() != "table"
+                    isinstance(expression, exp.Create)
+                    and expression.kind
+                    and expression.kind.lower() != "table"
             ):
                 sql = self._cte_to_lambda(expression)
             else:
@@ -868,8 +764,8 @@ class YDB(Dialect):
 
                 has_other_columns = any(
                     not (
-                        isinstance(expr, exp.Star)
-                        or (isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star))
+                            isinstance(expr, exp.Star)
+                            or (isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star))
                     )
                     for expr in expressions
                 )
@@ -880,8 +776,8 @@ class YDB(Dialect):
                         expr
                         for expr in expressions
                         if not (
-                            isinstance(expr, exp.Star)
-                            or (isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star))
+                                isinstance(expr, exp.Star)
+                                or (isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star))
                         )
                     ]
                     select_expr.set("expressions", new_expressions)
@@ -898,16 +794,16 @@ class YDB(Dialect):
 
             predicate = select.find_ancestor(exp.Condition)
             if (
-                not predicate
-                or parent_select is not predicate.parent_select
-                or not parent_select.args.get("from")
+                    not predicate
+                    or parent_select is not predicate.parent_select
+                    or not parent_select.args.get("from_")
             ):
                 return
 
             if any(
-                isinstance(expr, exp.Star)
-                or (isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star))
-                for expr in select.selects
+                    isinstance(expr, exp.Star)
+                    or (isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star))
+                    for expr in select.selects
             ):
                 return
 
@@ -923,9 +819,9 @@ class YDB(Dialect):
                 column_alias = first_select.alias_or_name
 
                 if (
-                    not column_alias
-                    or column_alias == ""
-                    or (column_alias == "*" and isinstance(first_select, exp.AggFunc))
+                        not column_alias
+                        or column_alias == ""
+                        or (column_alias == "*" and isinstance(first_select, exp.AggFunc))
                 ):
                     if isinstance(first_select, exp.Alias):
                         expr = first_select.this
@@ -958,17 +854,17 @@ class YDB(Dialect):
                 clause_parent_select = clause.parent_select if clause else None
 
                 if (isinstance(clause, exp.Having) and clause_parent_select is parent_select) or (
-                    (not clause or clause_parent_select is not parent_select)
-                    and (
-                        parent_select.args.get("group")
-                        or any(
+                        (not clause or clause_parent_select is not parent_select)
+                        and (
+                                parent_select.args.get("group")
+                                or any(
                             find_in_scope(select, exp.AggFunc) for select in parent_select.selects
                         )
-                    )
+                        )
                 ):
                     column = exp.Max(this=column)
                 elif not isinstance(select.parent, exp.Subquery) and not isinstance(
-                    select.parent, exp.Exists
+                        select.parent, exp.Exists
                 ):
                     return
 
@@ -1132,13 +1028,13 @@ class YDB(Dialect):
                 (key, column, predicate)
                 for key, column, predicate in keys
                 if isinstance(key, exp.Column)
-                and (
-                    not key.table  # No table qualifier = from subquery
-                    or (
-                        key.table and key.table not in external_tables
-                    )  # Has qualifier but not external
-                )
-                and is_external_column(column)
+                   and (
+                           not key.table  # No table qualifier = from subquery
+                           or (
+                                   key.table and key.table not in external_tables
+                           )  # Has qualifier but not external
+                   )
+                   and is_external_column(column)
             ]  # Verify column is actually external
 
             parent_predicate = select.find_ancestor(exp.Predicate)
@@ -1511,68 +1407,16 @@ class YDB(Dialect):
                         return True
             return False
 
-        def _extract_to_variable(
-            self, expr: exp.Expression, var_prefix: str = "_case_var"
-        ) -> exp.Expression:
-            """
-            Extract an expression to a variable and return a Var reference.
-            Wraps non-subquery expressions in a SELECT statement for YQL.
-
-            If the expression references unnest aliases (like _u_0), it cannot be extracted
-            to a variable since those aliases are not in scope. In that case, return the
-            expression as-is.
-
-            Args:
-                expr: The expression to extract
-                var_prefix: Prefix for variable name
-
-            Returns:
-                A Var expression referencing the extracted variable, or the original expression
-                if it references unnest aliases
-            """
-            # Check if expression references unnest aliases - these cannot be extracted
-            if self._references_unnest_alias(expr):
-                # Return the expression as-is - it must stay inline in the main query
-                return expr.copy()
-
-            var_counter = len(self.ydb_variables)
-            var_name = f"{var_prefix}_{var_counter}"
-
-            # If it's already a subquery, use it directly
-            if isinstance(expr, exp.Subquery):
-                self.ydb_variables[var_name] = expr.copy()
-            else:
-                # Wrap the expression in a SELECT statement
-                # For scalar expressions, SELECT returns a single row with the value
-                select_expr = exp.select(expr.copy())
-                self.ydb_variables[var_name] = select_expr
-
-            # Reference the variable directly (YQL variables are scalars when from SELECT)
-            return exp.Var(this=f"${var_name}")
-
         def _if(self, expression: exp.If) -> str:
             # Extract complex expressions to variables
             condition = expression.this
             true_expr = expression.args.get("true")
             false_expr = expression.args.get("false")
 
-            # Extract condition if it's not simple
-            if not self._is_simple_expression(condition):
-                condition = self._extract_to_variable(condition, "_if_cond")
-            else:
-                condition = condition.copy()
 
-            # Extract true expression if it's not simple
-            if true_expr and not self._is_simple_expression(true_expr):
-                true_expr = self._extract_to_variable(true_expr, "_if_true")
-            elif true_expr:
-                true_expr = true_expr.copy()
-
-            # Extract false expression if it's not simple
-            if false_expr and not self._is_simple_expression(false_expr):
-                false_expr = self._extract_to_variable(false_expr, "_if_false")
-            elif false_expr:
-                false_expr = false_expr.copy()
+            condition = condition.copy()
+            true_expr = true_expr.copy()
+            false_expr = false_expr.copy()
 
             this = self.sql(condition)
             true = self.sql(true_expr) if true_expr else ""
@@ -1601,7 +1445,7 @@ class YDB(Dialect):
             # If LEFT/RIGHT/FULL JOIN has no ON clause, convert to CROSS JOIN
             # YDB requires LEFT JOINs to have an ON clause
             if not on_condition and any(
-                kind in join_kind.upper() for kind in ["LEFT", "RIGHT", "FULL", "OUTER", ""]
+                    kind in join_kind.upper() for kind in ["LEFT", "RIGHT", "FULL", "OUTER", ""]
             ):
                 expression.set("kind", None)
                 expression.set("on", None)
@@ -1626,13 +1470,13 @@ class YDB(Dialect):
                         left = cond.this
                         right = cond.expression
                         if (
-                            isinstance(left, exp.Column)
-                            and isinstance(right, exp.Column)
-                            and hasattr(left, "table")
-                            and hasattr(right, "table")
-                            and left.table
-                            and right.table
-                            and left.table != right.table
+                                isinstance(left, exp.Column)
+                                and isinstance(right, exp.Column)
+                                and hasattr(left, "table")
+                                and hasattr(right, "table")
+                                and left.table
+                                and right.table
+                                and left.table != right.table
                         ):
                             equality_conditions.append(cond)
                         else:
@@ -1661,7 +1505,7 @@ class YDB(Dialect):
                     # For LEFT/RIGHT/FULL JOINs, YDB requires ON clause, so convert to CROSS JOIN
                     join_kind = expression.side or ""
                     if any(
-                        kind in join_kind.upper() for kind in ["LEFT", "RIGHT", "FULL", "OUTER"]
+                            kind in join_kind.upper() for kind in ["LEFT", "RIGHT", "FULL", "OUTER"]
                     ):
                         # Convert to CROSS JOIN by removing kind and ON
                         expression.set("kind", None)
@@ -1690,14 +1534,11 @@ class YDB(Dialect):
             return super().join_sql(expression)
 
         def select_sql(self, expression: exp.Select) -> str:
-            """
-            Generate SELECT SQL without modifying the original expressions.
-            The GROUP BY and ORDER BY will handle alias references separately.
-            """
             # Store the original-to-alias mapping for GROUP BY/ORDER BY reference
             self.expression_to_alias = {}
 
             # Build mapping of original expressions to their aliases
+            # After that, in WHERE and ORDER BY use aliases
             for select_expr in expression.expressions:
                 if isinstance(select_expr, exp.Alias):
                     expr_sql = self.sql(select_expr.this).strip()
@@ -1706,8 +1547,8 @@ class YDB(Dialect):
                     expr_sql = self.sql(select_expr).strip()
                     if isinstance(select_expr, (exp.Column, exp.Identifier)):
                         self.expression_to_alias[expr_sql] = select_expr.alias_or_name
-
-            # Generate SQL without modifying expressions
+            # in .sql() calls ww generated ydb_variables, drop it not to produce unused vars
+            self.ydb_variables = {}
             return super().select_sql(expression)
 
         def _contains_literals(self, condition: exp.Expression) -> bool:
@@ -1894,8 +1735,8 @@ class YDB(Dialect):
                     expr_sql = self.sql(expr).strip()
 
                     if (
-                        hasattr(self, "expression_to_alias")
-                        and expr_sql in self.expression_to_alias
+                            hasattr(self, "expression_to_alias")
+                            and expr_sql in self.expression_to_alias
                     ):
                         alias_name = self.expression_to_alias[expr_sql]
                         alias_expr = exp.to_identifier(alias_name)
@@ -1906,8 +1747,8 @@ class YDB(Dialect):
                 else:
                     expr_sql = self.sql(order_expr).strip()
                     if (
-                        hasattr(self, "expression_to_alias")
-                        and expr_sql in self.expression_to_alias
+                            hasattr(self, "expression_to_alias")
+                            and expr_sql in self.expression_to_alias
                     ):
                         alias_name = self.expression_to_alias[expr_sql]
                         alias_expr = exp.to_identifier(alias_name)

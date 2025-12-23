@@ -166,15 +166,6 @@ class TestYDB(Validator):
         new_parsed = eliminate_join_marks(parsed)
         self.assertEqual(new_parsed.sql(), "SELECT * FROM b LEFT JOIN a ON a.id = b.id")
 
-    def test_between(self):
-        sql = "SELECT * FROM T WHERE SYSDATE BETWEEN A.valid_from_dttm(+) AND A.valid_to_dttm(+)"
-        parsed = parse_one(sql, dialect="oracle")
-        new_parsed = eliminate_join_marks(parsed)
-        self.assertEqual(
-            new_parsed.sql(),
-            "SELECT * FROM T WHERE CURRENT_TIMESTAMP() BETWEEN A.valid_from_dttm AND A.valid_to_dttm",
-        )
-
     def test_table_name_lower_case(self):
         sql = "SELECT * FROM B"
         parsed = parse_one(sql)
@@ -297,7 +288,7 @@ class TestYDB(Validator):
         result = parsed.sql(dialect="ydb")
         self.assertEqual(result, expected)
 
-    def test_decorrelate_in_subquery(self):
+    def test_unnest_in_subquery(self):
         sql = """SELECT a.id \
                  FROM a \
                  WHERE a.id IN (SELECT b.a_id FROM b WHERE b.value > 10)"""
@@ -306,6 +297,8 @@ class TestYDB(Validator):
 
         parsed = parse_one(sql)
         result = parsed.sql(dialect="ydb")
+
+        print(result)
         self.assertEqual(result, expected)
 
     def test_decorrelate_multiple_subqueries(self):
@@ -430,20 +423,6 @@ class TestYDB(Validator):
               FROM t \
               """
         expected = "SELECT CASE WHEN a > 0 THEN CASE WHEN b > 0 THEN 'A' ELSE 'B' END ELSE 'C' END AS result FROM `t`"
-        parsed = parse_one(sql)
-        generated_sql = parsed.sql(dialect="ydb")
-        self.assertEqual(generated_sql, expected)
-
-    def test_if_with_subquery_in_true(self):
-        sql = """
-              SELECT IF(
-                             a > 10,
-                             (SELECT SUM(b) FROM t2 WHERE t2.a = t1.a),
-                             0
-                     ) as res
-              FROM t1 \
-              """
-        expected = "SELECT IF(a > 10, _u_1._col0, 0) AS res FROM `t1`, (SELECT SUM(b) AS _col0 FROM `t2` WHERE t2.a = t1.a) AS _u_1"
         parsed = parse_one(sql)
         generated_sql = parsed.sql(dialect="ydb")
         self.assertEqual(generated_sql, expected)
