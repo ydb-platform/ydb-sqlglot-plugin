@@ -1,7 +1,78 @@
-from sqlglot import parse_one
-from sqlglot.dialects.ydb import make_db_name_lower, table_names_to_lower_case, eliminate_join_marks
-from tests.dialects.test_dialect import Validator
+from sqlglot import (
+    parse_one,
+    ErrorLevel,
+    UnsupportedError,
+)
+from ydb_sqlglot.ydb import make_db_name_lower, table_names_to_lower_case, eliminate_join_marks
+# from tests.dialects.test_dialect import Validator
+import unittest
+from sqlglot.parser import logger as parser_logger
 
+
+
+class Validator(unittest.TestCase):
+    dialect = None
+
+    def parse_one(self, sql, **kwargs):
+        return parse_one(sql, read=self.dialect, **kwargs)
+
+    def validate_identity(
+        self, sql, write_sql=None, pretty=False, check_command_warning=False, identify=False
+    ):
+        if check_command_warning:
+            with self.assertLogs(parser_logger) as cm:
+                expression = self.parse_one(sql)
+                assert f"'{sql[:100]}' contains unsupported syntax" in cm.output[0]
+        else:
+            expression = self.parse_one(sql)
+
+        self.assertEqual(
+            write_sql or sql, expression.sql(dialect=self.dialect, pretty=pretty, identify=identify)
+        )
+        return expression
+
+    def validate_all(self, sql, read=None, write=None, pretty=False, identify=False):
+        """
+        Validate that:
+        1. Everything in `read` transpiles to `sql`
+        2. `sql` transpiles to everything in `write`
+
+        Args:
+            sql (str): Main SQL expression
+            read (dict): Mapping of dialect -> SQL
+            write (dict): Mapping of dialect -> SQL
+            pretty (bool): prettify both read and write
+            identify (bool): quote identifiers in both read and write
+        """
+        expression = self.parse_one(sql)
+
+        for read_dialect, read_sql in (read or {}).items():
+            with self.subTest(f"{read_dialect} -> {sql}"):
+                self.assertEqual(
+                    parse_one(read_sql, read_dialect).sql(
+                        self.dialect,
+                        unsupported_level=ErrorLevel.IGNORE,
+                        pretty=pretty,
+                        identify=identify,
+                    ),
+                    sql,
+                )
+
+        for write_dialect, write_sql in (write or {}).items():
+            with self.subTest(f"{sql} -> {write_dialect}"):
+                if write_sql is UnsupportedError:
+                    with self.assertRaises(UnsupportedError):
+                        expression.sql(write_dialect, unsupported_level=ErrorLevel.RAISE)
+                else:
+                    self.assertEqual(
+                        expression.sql(
+                            write_dialect,
+                            unsupported_level=ErrorLevel.IGNORE,
+                            pretty=pretty,
+                            identify=identify,
+                        ),
+                        write_sql,
+                    )
 
 class TestYDB(Validator):
     maxDiff = None
@@ -645,7 +716,7 @@ PARTITION BY HASH (`id`);""",
                   rating      DECIMAL(3, 1),
                   birth_date  DATE,
                   event_time  DATETIME,
-                  image_data  BLOB,    
+                  image_data  BLOB,
                   PRIMARY KEY (id)
               ) \
               """

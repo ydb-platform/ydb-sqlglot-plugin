@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ydb-sqlglot-plugin"
+version = "0.1.0"
+description = "YDB dialect plugin for sqlglot"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "YDB Team"}
+]
+keywords = ["sql", "sqlglot", "ydb", "dialect", "parser", "transpiler"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "sqlglot>=26.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ydb-platform/ydb-sqlglot-plugin"
+Repository = "https://github.com/ydb-platform/ydb-sqlglot-plugin"
+
+[project.entry-points."sqlglot.dialects"]
+ydb = "ydb_sqlglot.ydb:YDB"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ydb_sqlglot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
