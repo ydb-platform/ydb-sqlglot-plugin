@@ -1,6 +1,7 @@
 """YDB SQL dialect plugin for sqlglot."""
 
-from ydb_sqlglot.ydb import YDB
+from .ydb import YDB
+from .version import VERSION
 
-__version__ = "0.0.0"
-__all__ = ["YDB"]
+
+__version__ = VERSION
