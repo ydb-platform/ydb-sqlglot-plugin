@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ydb-sqlglot-plugin"
-version = "0.1.0"
+version = "0.0.0"
 description = "YDB dialect plugin for sqlglot"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -23,7 +23,7 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "sqlglot>=26.0.0",
+    "sqlglot>=28.6.0",
 ]
 
 [project.optional-dependencies]
