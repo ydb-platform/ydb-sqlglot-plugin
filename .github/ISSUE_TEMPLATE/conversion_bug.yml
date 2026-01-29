@@ -1,0 +1,88 @@
+name: "Conversion Bug"
+description: "Report an issue with SQL query conversion"
+title: "[Bug]: "
+labels: ["bug", "conversion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this issue!
+        Please fill out the form below to help us understand and fix the problem.
+
+  - type: input
+    id: source-dialect
+    attributes:
+      label: Source Dialect
+      description: "The dialect of the input query (e.g., postgres, mysql, ydb)"
+      placeholder: "postgres"
+    validations:
+      required: true
+
+  - type: input
+    id: target-dialect
+    attributes:
+      label: Target Dialect
+      description: "The dialect you are converting to (e.g., ydb, postgres, mysql)"
+      placeholder: "ydb"
+    validations:
+      required: true
+
+  - type: textarea
+    id: input-query
+    attributes:
+      label: Input Query
+      description: "The SQL query you are trying to convert"
+      placeholder: |
+        SELECT * FROM users WHERE id = 1;
+      render: sql
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-output
+    attributes:
+      label: Actual Output
+      description: "The result you got (or error message if conversion failed)"
+      placeholder: |
+        Paste the actual output or error message here
+      render: sql
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-output
+    attributes:
+      label: Expected Output
+      description: "What you expected the converted query to look like (if known)"
+      placeholder: |
+        Paste the expected output here (optional)
+      render: sql
+    validations:
+      required: false
+
+  - type: input
+    id: sqlglot-version
+    attributes:
+      label: sqlglot version
+      description: "Output of `pip show sqlglot | grep Version`"
+      placeholder: "e.g., 26.0.0"
+    validations:
+      required: false
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: ydb-sqlglot-plugin version
+      description: "Output of `pip show ydb-sqlglot-plugin | grep Version`"
+      placeholder: "e.g., 0.1.0"
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: "Any additional information that might help us understand the issue"
+      placeholder: "Add any other context about the problem here"
+    validations:
+      required: false

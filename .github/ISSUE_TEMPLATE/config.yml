@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: sqlglot Documentation
+    url: https://sqlglot.com/
+    about: "Check the sqlglot documentation for general usage questions"
+  - name: YDB Documentation
+    url: https://ydb.tech/docs/
+    about: "Check the YDB documentation for YDB-specific questions"
