@@ -34,13 +34,10 @@ def test_connection(ydb_pool):
 
 def test_extract_year(ydb_pool):
     # EXTRACT(YEAR FROM ...) → DateTime::GetYear(...)
-    # The dialect emits AddTimezone(..., "Europe/Moscow"), so compare against Moscow time
-    # to avoid flakiness around the UTC year boundary (Moscow is UTC+3).
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+    from datetime import datetime, timezone
     yql = transpile("SELECT EXTRACT(YEAR FROM CURRENT_TIMESTAMP)", read="postgres")
     result = ydb_pool.execute_with_retries(yql)
-    assert result[0].rows[0][0] == datetime.now(ZoneInfo("Europe/Moscow")).year
+    assert result[0].rows[0][0] == datetime.now(timezone.utc).year
 
 
 def test_extract_month(ydb_pool):

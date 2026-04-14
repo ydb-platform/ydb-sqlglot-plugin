@@ -92,7 +92,7 @@ Functions below are recognized by sqlglot as standard SQL expressions and transl
 | `EXTRACT(WEEK FROM x)` | `DateTime::GetWeekOfYear(x)` |
 | `EXTRACT(MONTH FROM x)` | `DateTime::GetMonth(x)` |
 | `EXTRACT(YEAR FROM x)` | `DateTime::GetYear(x)` |
-| `CURRENT_TIMESTAMP` | `AddTimezone(CurrentUtcTimestamp(), "Europe/Moscow")` |
+| `CURRENT_TIMESTAMP` | `CurrentUtcTimestamp()` |
 | `STR_TO_DATE(str, fmt)` / `TO_DATE(str, fmt)` | `DateTime::MakeTimestamp(DateTime::Parse(fmt)(str))` |
 | `DATE_ADD(x, INTERVAL n MONTH)` | `DateTime::MakeDate(DateTime::ShiftMonths(x, n))` |
 | `DATE_ADD(x, INTERVAL n YEAR)` | `DateTime::MakeDate(DateTime::ShiftYears(x, n))` |
@@ -111,8 +111,6 @@ Functions below are recognized by sqlglot as standard SQL expressions and transl
 | `dateDiff('week', a, b)` | `(CAST(b AS Int64) - CAST(a AS Int64)) / 604800000000` |
 
 > **Note on `dateDiff`:** YDB stores `Timestamp` as microseconds since epoch. The formula above gives exact integer units assuming both arguments are `Timestamp`. Results for `Date`-typed columns will differ.
-
-> **Note on `CURRENT_TIMESTAMP`:** the timezone is hardcoded to `Europe/Moscow`. Change `_current_timestamp_sql` in `ydb.py` if you need a different zone.
 
 ### Strings
 

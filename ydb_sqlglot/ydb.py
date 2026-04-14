@@ -1301,7 +1301,7 @@ class YDB(Dialect):
             Returns:
                 YDB-specific SQL for current timestamp
             """
-            return 'AddTimezone(CurrentUtcTimestamp(), "Europe/Moscow")'
+            return "CurrentUtcTimestamp()"
 
         def _str_to_date(self, expression: exp.StrToDate) -> str:
             """
