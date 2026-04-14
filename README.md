@@ -172,20 +172,24 @@ Functions below are recognized by sqlglot as standard SQL expressions and transl
 
 ## Limitations
 
-The following dialect-specific functions are **not translated** — they are passed through as-is and must be replaced manually before the query will run on YDB. The examples below are from ClickHouse, which is a common source dialect:
+### Correlated subqueries in DML
 
-| Function | YQL equivalent |
-|---|---|
-| `now()` | `CurrentUtcDatetime()` |
-| `today()` | `CurrentUtcDate()` |
-| `parseDateTimeBestEffort(str)` | `DateTime::Parse(...)(str)` with explicit format |
-| `toDate(x)` | `CAST(x AS Date)` |
-| `toString(x)` | `CAST(x AS Utf8)` |
-| `toFloat64(x)` | `CAST(x AS Double)` |
-| `toInt64(x)` | `CAST(x AS Int64)` |
-| `countDistinct(x)` | `COUNT(DISTINCT x)` |
-| `groupArray(n)(x)` | no direct equivalent; use `ListTake(AGGREGATE_LIST(x), n)` |
-| `dateDiff('month', a, b)` | no exact equivalent (month length varies) |
+Correlated subqueries inside `UPDATE` or `INSERT` statements cannot be automatically decorrelated — YDB does not support them natively, and rewriting requires knowledge of the table's primary key. Rewrite manually using a `$variable`:
+
+```sql
+-- not supported (will raise an error)
+UPDATE t SET col = (SELECT val FROM other WHERE other.id = t.id)
+
+-- workaround
+$vals = (SELECT id, val FROM other);
+UPDATE t SET col = (SELECT val FROM $vals WHERE id = t.id)
+```
+
+Correlated subqueries inside `SELECT` are handled automatically via JOIN rewriting.
+
+### `dateDiff` with month granularity
+
+`dateDiff('month', a, b)` has no exact equivalent in YDB because months have variable length. Use `DateTime::ShiftMonths` for date arithmetic instead.
 
 ---
 
