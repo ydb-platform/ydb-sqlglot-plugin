@@ -1,6 +1,8 @@
 import typing as t
 
-from sqlglot import exp, tokens, generator, transforms, TokenType, parser, Generator, Expression
+from sqlglot import exp, tokens, generator, transforms, TokenType, parser, Generator
+from sqlglot.errors import UnsupportedError
+from sqlglot.expressions import Expression
 from sqlglot.dialects.dialect import Dialect, unit_to_var
 from sqlglot.dialects.dialect import NormalizationStrategy, concat_to_dpipe_sql
 from sqlglot.helper import name_sequence, seq_get, flatten
@@ -134,6 +136,9 @@ class YDB(Dialect):
         "%S": "%S",
     }
     NORMALIZE_FUNCTIONS = False
+    # YDB handles safe division via NULLIF in the source dialect already;
+    # setting this prevents div_sql from wrapping the denominator a second time.
+    SAFE_DIVISION = True
 
     class Tokenizer(tokens.Tokenizer):
         """
@@ -733,6 +738,20 @@ class YDB(Dialect):
                 select = scope.expression
                 parent = select.parent_select
                 if not parent:
+                    if scope.external_columns:
+                        # Correlated subquery inside a DML statement (UPDATE/INSERT).
+                        # YDB does not support correlated subqueries in DML context and
+                        # automatic decorrelation via JOIN is not possible without knowing
+                        # the table's primary key. Rewrite manually using a $variable, e.g.:
+                        #   $rows = (SELECT id FROM t WHERE <condition>);
+                        #   UPDATE t SET ... WHERE id IN (SELECT id FROM $rows);
+                        dml = select.find_ancestor(exp.Update, exp.Insert)
+                        if dml is not None:
+                            kind = type(dml).__name__.upper()
+                            raise UnsupportedError(
+                                f"Correlated subquery inside {kind} cannot be automatically "
+                                f"decorrelated in YDB — rewrite manually using a $variable subquery"
+                            )
                     continue
                 if scope.external_columns:
                     self.decorrelate(select, parent, scope.external_columns, next_alias_name)
@@ -1423,6 +1442,24 @@ class YDB(Dialect):
             false = self.sql(false_expr) if false_expr else ""
             return f"IF({this}, {true}, {false})"
 
+        def round_sql(self, expression: exp.Round) -> str:
+            # SQL ROUND(x, n) rounds to n decimal places (positive = fractional digits).
+            # YDB Math::Round(x, n) uses the opposite sign convention: n is the power of 10
+            # to round to, so n=2 means "round to nearest 100", n=-2 means "2 decimal places".
+            # We negate the precision argument to match SQL semantics.
+            this = self.sql(expression, "this")
+            decimals = expression.args.get("decimals")
+            if decimals is None:
+                return f"Math::Round({this})"
+            negated = exp.Neg(this=decimals) if not isinstance(decimals, exp.Neg) else decimals.this
+            return f"Math::Round({this}, {self.sql(negated)})"
+
+        def count_sql(self, expression: exp.Count) -> str:
+            # ClickHouse count() (no args) → COUNT(*) in YQL
+            if not expression.this and not expression.expressions:
+                return "COUNT(*)"
+            return self.function_fallback_sql(expression)
+
         def _null_if(self, expression: exp.Nullif) -> str:
             lhs = expression.this
             rhs = expression.expression
@@ -1533,6 +1570,32 @@ class YDB(Dialect):
 
             return super().join_sql(expression)
 
+        def update_sql(self, expression: exp.Update) -> str:
+            table = expression.args.get("this")
+            alias_node = table.args.get("alias") if table else None
+
+            if alias_node:
+                alias_name = alias_node.name
+                expression = expression.copy()
+                table = expression.args["this"]
+                table.set("alias", None)
+
+                # Strip the alias qualifier from column references in the top-level
+                # SET and WHERE — but not inside subqueries (depth > 0).
+                for node in expression.walk():
+                    if isinstance(node, exp.Column):
+                        tbl = node.args.get("table")
+                        if tbl and tbl.name == alias_name:
+                            p, depth = node.parent, 0
+                            while p:
+                                if isinstance(p, (exp.Subquery, exp.Select)):
+                                    depth += 1
+                                p = p.parent
+                            if depth == 0:
+                                node.set("table", None)
+
+            return super().update_sql(expression)
+
         def select_sql(self, expression: exp.Select) -> str:
             # Store the original-to-alias mapping for GROUP BY/ORDER BY reference
             self.expression_to_alias = {}
@@ -1605,6 +1668,52 @@ class YDB(Dialect):
                     raise ValueError(f"Unsupported interval type: {unit.name}")
 
                 return f"{source} {op} {interval_expr}"
+
+        def interval_sql(self, expression: exp.Interval) -> str:
+            """
+            Convert standard SQL INTERVAL literals to YQL DateTime module calls.
+            e.g. INTERVAL '30' DAY -> DateTime::IntervalFromDays(30)
+            """
+            unit = expression.text("unit").upper()
+            value = self.sql(expression, "this")
+            # Strip surrounding quotes from literal values
+            if value.startswith("'") and value.endswith("'"):
+                value = value[1:-1]
+
+            mapping = {
+                "DAY": f"DateTime::IntervalFromDays({value})",
+                "HOUR": f"DateTime::IntervalFromHours({value})",
+                "MINUTE": f"DateTime::IntervalFromMinutes({value})",
+                "SECOND": f"DateTime::IntervalFromSeconds({value})",
+            }
+            if unit in mapping:
+                return mapping[unit]
+            # MONTH/YEAR intervals have no direct DateTime:: equivalent;
+            # leave them as-is and let the user handle them.
+            return super().interval_sql(expression)
+
+        def _date_diff(self, expression: exp.DateDiff) -> str:
+            """
+            Convert dateDiff(unit, start, end) to YQL arithmetic.
+            YDB Timestamps are stored in microseconds, so we cast the subtraction to Int64.
+            dateDiff args: this=end, expression=start, unit=unit
+            """
+            unit = expression.text("unit").upper()
+            end = self.sql(expression, "this")
+            start = self.sql(expression, "expression")
+
+            factors = {
+                "SECOND": 1_000_000,
+                "MINUTE": 60_000_000,
+                "HOUR": 3_600_000_000,
+                "DAY": 86_400_000_000,
+                "WEEK": 604_800_000_000,
+            }
+            if unit in factors:
+                factor = factors[unit]
+                return f"(CAST({end} AS Int64) - CAST({start} AS Int64)) / {factor}"
+            self.unsupported(f"DateDiff unit not supported: {unit}")
+            return f"(CAST({end} AS Int64) - CAST({start} AS Int64))"
 
         def _arrayany(self, expression: exp.ArrayAny) -> str:
             """
@@ -1707,7 +1816,7 @@ class YDB(Dialect):
 
             # Build the GROUP BY clause
             if group_by_items:
-                result = f" GROUP BY ({group_by_items})"
+                result = f" GROUP BY {group_by_items}"
             else:
                 result = " GROUP BY"
 
@@ -1798,17 +1907,18 @@ class YDB(Dialect):
             exp.Nullif: _null_if,
             exp.DateAdd: _date_add,
             exp.DateSub: _date_add,
+            exp.DateDiff: _date_diff,
             exp.JSONBContains: rename_func_not_normalize("Yson::Contains"),
             exp.ForeignKey: lambda self, e: self.unsupported("constraint not supported"),
             exp.StringToArray: rename_func_not_normalize("String::SplitToList"),
             exp.Array: rename_func_not_normalize("AsList"),
             exp.ArrayToString: rename_func_not_normalize("String::JoinFromList"),
-            exp.Upper: rename_func_not_normalize("String::Upper"),
-            exp.Lower: rename_func_not_normalize("String::Lower"),
+            exp.Upper: rename_func_not_normalize("Unicode::ToUpper"),
+            exp.Lower: rename_func_not_normalize("Unicode::ToLower"),
             exp.StrPosition: rename_func_not_normalize("Find"),
-            exp.Length: rename_func_not_normalize("String::Length"),
+            exp.Length: rename_func_not_normalize("Unicode::GetLength"),
             exp.Unnest: rename_func_not_normalize("FLATTEN BY"),
-            exp.Round: rename_func_not_normalize("Math::Round"),
+            # exp.Round handled by round_sql (precision sign must be negated)
             exp.Set: _set_sql,
             exp.Group: _group_by,
             exp.Order: _order_sql,

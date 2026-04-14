@@ -27,3 +27,7 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+
+# LLM / AI assistants
+.claude/
+ydb_certs/
