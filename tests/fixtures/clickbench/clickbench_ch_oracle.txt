@@ -1,0 +1,241 @@
+ Container ydb-sqlglot-clickbench-oracle-clickhouse-1  Created
+ Container ydb-sqlglot-clickbench-oracle-clickhouse-1  Starting
+ Container ydb-sqlglot-clickbench-oracle-clickhouse-1  Started
+Waiting for ClickHouse...
+
+======== Q01 ========
+   ┌─COUNT()─┐
+1. │       5 │
+   └─────────┘
+
+======== Q02 ========
+   ┌─COUNT()─┐
+1. │       2 │
+   └─────────┘
+
+======== Q03 ========
+   ┌─SUM(AdvEngineID)─┬─COUNT()─┬─AVG(ResolutionWidth)─┐
+1. │                3 │       5 │                  384 │
+   └──────────────────┴─────────┴──────────────────────┘
+
+======== Q04 ========
+   ┌─AVG(UserID)─┐
+1. │         300 │
+   └─────────────┘
+
+======== Q05 ========
+   ┌─COUNTDistinct(UserID)─┐
+1. │                     5 │
+   └───────────────────────┘
+
+======== Q06 ========
+   ┌─COUNTDistinct(SearchPhrase)─┐
+1. │                           3 │
+   └─────────────────────────────┘
+
+======== Q07 ========
+   ┌─MIN(EventDate)─┬─MAX(EventDate)─┐
+1. │     2013-06-01 │     2013-07-20 │
+   └────────────────┴────────────────┘
+
+======== Q08 ========
+   ┌─AdvEngineID─┬─COUNT()─┐
+1. │           1 │       1 │
+2. │           2 │       1 │
+   └─────────────┴─────────┘
+
+======== Q09 ========
+   ┌─RegionID─┬─u─┐
+1. │        0 │ 3 │
+2. │        1 │ 1 │
+3. │      225 │ 1 │
+   └──────────┴───┘
+
+======== Q10 ========
+   ┌─RegionID─┬─SUM(AdvEngineID)─┬─c─┬─AVG(ResolutionWidth)─┬─COUNTDistinct(UserID)─┐
+1. │        0 │                2 │ 3 │                    0 │                     3 │
+2. │        1 │                0 │ 1 │                    0 │                     1 │
+3. │      225 │                1 │ 1 │                 1920 │                     1 │
+   └──────────┴──────────────────┴───┴──────────────────────┴───────────────────────┘
+
+======== Q11 ========
+   ┌─MobilePhoneModel─┬─u─┐
+1. │ Samsung          │ 1 │
+2. │ iPhone           │ 1 │
+   └──────────────────┴───┘
+
+======== Q12 ========
+   ┌─MobilePhone─┬─MobilePhoneModel─┬─u─┐
+1. │           0 │ iPhone           │ 1 │
+2. │           1 │ Samsung          │ 1 │
+   └─────────────┴──────────────────┴───┘
+
+======== Q13 ========
+   ┌─SearchPhrase──┬─c─┐
+1. │ test query    │ 1 │
+2. │ another query │ 1 │
+   └───────────────┴───┘
+
+======== Q14 ========
+   ┌─SearchPhrase──┬─u─┐
+1. │ test query    │ 1 │
+2. │ another query │ 1 │
+   └───────────────┴───┘
+
+======== Q15 ========
+   ┌─SearchEngineID─┬─SearchPhrase──┬─c─┐
+1. │              0 │ another query │ 1 │
+2. │              0 │ test query    │ 1 │
+   └────────────────┴───────────────┴───┘
+
+======== Q16 ========
+   ┌─UserID─┬─COUNT()─┐
+1. │    400 │       1 │
+2. │    300 │       1 │
+3. │    500 │       1 │
+4. │    100 │       1 │
+5. │    200 │       1 │
+   └────────┴─────────┘
+
+======== Q17 ========
+   ┌─UserID─┬─SearchPhrase──┬─COUNT()─┐
+1. │    500 │               │       1 │
+2. │    100 │ test query    │       1 │
+3. │    300 │ another query │       1 │
+4. │    400 │               │       1 │
+5. │    200 │               │       1 │
+   └────────┴───────────────┴─────────┘
+
+======== Q18 ========
+   ┌─UserID─┬─SearchPhrase──┬─COUNT()─┐
+1. │    500 │               │       1 │
+2. │    100 │ test query    │       1 │
+3. │    300 │ another query │       1 │
+4. │    400 │               │       1 │
+5. │    200 │               │       1 │
+   └────────┴───────────────┴─────────┘
+
+======== Q19 ========
+   ┌─UserID─┬─m─┬─SearchPhrase──┬─COUNT()─┐
+1. │    100 │ 0 │ test query    │       1 │
+2. │    200 │ 0 │               │       1 │
+3. │    400 │ 0 │               │       1 │
+4. │    300 │ 0 │ another query │       1 │
+5. │    500 │ 0 │               │       1 │
+   └────────┴───┴───────────────┴─────────┘
+
+======== Q20 ========
+
+======== Q21 ========
+   ┌─COUNT()─┐
+1. │       3 │
+   └─────────┘
+
+======== Q22 ========
+   ┌─SearchPhrase──┬─MIN(URL)─────────────────────────────┬─c─┐
+1. │ test query    │ https://www.google.com/search?q=test │ 1 │
+2. │ another query │ https://google.com                   │ 1 │
+   └───────────────┴──────────────────────────────────────┴───┘
+
+======== Q23 ========
+
+======== Q24 ========
+   ┌─WatchID─┬─JavaEnable─┬─Title───────┬─GoodEvent─┬───────────────EventTime─┬──EventDate─┬─CounterID─┬─ClientIP─┬─RegionID─┬─UserID─┬─CounterClass─┬─OS─┬─UserAgent─┬─URL──────────────────────────────────┬─Referer─┬─IsRefresh─┬─RefererCategoryID─┬─RefererRegionID─┬─URLCategoryID─┬─URLRegionID─┬─ResolutionWidth─┬─ResolutionHeight─┬─ResolutionDepth─┬─FlashMajor─┬─FlashMinor─┬─FlashMinor2─┬─NetMajor─┬─NetMinor─┬─UserAgentMajor─┬─UserAgentMinor─┬─CookieEnable─┬─JavascriptEnable─┬─IsMobile─┬─MobilePhone─┬─MobilePhoneModel─┬─Params─┬─IPNetworkID─┬─TraficSourceID─┬─SearchEngineID─┬─SearchPhrase──┬─AdvEngineID─┬─IsArtifical─┬─WindowClientWidth─┬─WindowClientHeight─┬─ClientTimeZone─┬─────────ClientEventTime─┬─SilverlightVersion1─┬─SilverlightVersion2─┬─SilverlightVersion3─┬─SilverlightVersion4─┬─PageCharset─┬─CodeVersion─┬─IsLink─┬─IsDownload─┬─IsNotBounce─┬─FUniqID─┬─OriginalURL─┬─HID─┬─IsOldCounter─┬─IsEvent─┬─IsParameter─┬─DontCountHits─┬─WithHash─┬─HitColor─┬──────────LocalEventTime─┬─Age─┬─Sex─┬─Income─┬─Interests─┬─Robotness─┬─RemoteIP─┬─WindowName─┬─OpenerName─┬─HistoryLength─┬─BrowserLanguage─┬─BrowserCountry─┬─SocialNetwork─┬─SocialAction─┬─HTTPError─┬─SendTiming─┬─DNSTiming─┬─ConnectTiming─┬─ResponseStartTiming─┬─ResponseEndTiming─┬─FetchTiming─┬─SocialSourceNetworkID─┬─SocialSourcePage─┬─ParamPrice─┬─ParamOrderID─┬─ParamCurrency─┬─ParamCurrencyID─┬─OpenstatServiceName─┬─OpenstatCampaignID─┬─OpenstatAdID─┬─OpenstatSourceID─┬─UTMSource─┬─UTMMedium─┬─UTMCampaign─┬─UTMContent─┬─UTMTerm─┬─FromTag─┬─HasGCLID─┬─RefererHash─┬─URLHash─┬─CLID─┐
+1. │       3 │          0 │             │         0 │ 2013-06-01 08:00:00.000 │ 2013-06-01 │         1 │        0 │        0 │    300 │            0 │  0 │         0 │ https://google.com                   │         │         0 │                 0 │               0 │             0 │           0 │               0 │                0 │               0 │          0 │          0 │             │        0 │        0 │              0 │                │            0 │                0 │        1 │           1 │ Samsung          │        │           0 │              0 │              0 │ another query │           2 │           0 │                 0 │                  0 │              0 │ 2013-06-01 08:00:00.000 │                   0 │                   0 │                   0 │                   0 │             │           0 │      0 │          0 │           0 │       0 │             │   0 │            0 │       0 │           0 │             0 │        0 │          │ 2013-06-01 08:00:00.000 │   0 │   0 │      0 │         0 │         0 │        0 │          0 │          0 │             0 │                 │                │               │              │         0 │          0 │         0 │             0 │                   0 │                 0 │           0 │                     0 │                  │          0 │              │               │               0 │                     │                    │              │                  │           │           │             │            │         │         │        0 │           0 │       0 │    0 │
+2. │       5 │          0 │ Google News │         0 │ 2013-07-01 00:00:00.000 │ 2013-07-01 │        62 │        0 │        0 │    500 │            0 │  0 │         0 │ https://news.google.com              │         │         0 │                 0 │               0 │             0 │           0 │               0 │                0 │               0 │          0 │          0 │             │        0 │        0 │              0 │                │            0 │                0 │        0 │           0 │                  │        │           0 │              0 │              0 │               │           0 │           0 │                 0 │                  0 │              0 │ 2013-07-01 00:00:00.000 │                   0 │                   0 │                   0 │                   0 │             │           0 │      0 │          0 │           0 │       0 │             │   0 │            0 │       0 │           0 │             0 │        0 │          │ 2013-07-01 00:00:00.000 │   0 │   0 │      0 │         0 │         0 │        0 │          0 │          0 │             0 │                 │                │               │              │         0 │          0 │         0 │             0 │                   0 │                 0 │           0 │                     0 │                  │          0 │              │               │               0 │                     │                    │              │                  │           │           │             │            │         │         │        0 │           0 │       0 │    0 │
+3. │       1 │          0 │             │         0 │ 2013-07-14 10:00:00.000 │ 2013-07-14 │        62 │        0 │      225 │    100 │            0 │  0 │         0 │ https://www.google.com/search?q=test │         │         0 │                 0 │               0 │             0 │           0 │            1920 │                0 │               0 │          0 │          0 │             │        0 │        0 │              0 │                │            0 │                0 │        0 │           0 │ iPhone           │        │           0 │              0 │              0 │ test query    │           1 │           0 │                 0 │                  0 │              0 │ 2013-07-14 10:00:00.000 │                   0 │                   0 │                   0 │                   0 │             │           0 │      0 │          0 │           0 │       0 │             │   0 │            0 │       0 │           0 │             0 │        0 │          │ 2013-07-14 10:00:00.000 │   0 │   0 │      0 │         0 │         0 │        0 │          0 │          0 │             0 │                 │                │               │              │         0 │          0 │         0 │             0 │                   0 │                 0 │           0 │                     0 │                  │          0 │              │               │               0 │                     │                    │              │                  │           │           │             │            │         │         │        0 │           0 │       0 │    0 │
+   └─────────┴────────────┴─────────────┴───────────┴─────────────────────────┴────────────┴───────────┴──────────┴──────────┴────────┴──────────────┴────┴───────────┴──────────────────────────────────────┴─────────┴───────────┴───────────────────┴─────────────────┴───────────────┴─────────────┴─────────────────┴──────────────────┴─────────────────┴────────────┴────────────┴─────────────┴──────────┴──────────┴────────────────┴────────────────┴──────────────┴──────────────────┴──────────┴─────────────┴──────────────────┴────────┴─────────────┴────────────────┴────────────────┴───────────────┴─────────────┴─────────────┴───────────────────┴────────────────────┴────────────────┴─────────────────────────┴─────────────────────┴─────────────────────┴─────────────────────┴─────────────────────┴─────────────┴─────────────┴────────┴────────────┴─────────────┴─────────┴─────────────┴─────┴──────────────┴─────────┴─────────────┴───────────────┴──────────┴──────────┴─────────────────────────┴─────┴─────┴────────┴───────────┴───────────┴──────────┴────────────┴────────────┴───────────────┴─────────────────┴────────────────┴───────────────┴──────────────┴───────────┴────────────┴───────────┴───────────────┴─────────────────────┴───────────────────┴─────────────┴───────────────────────┴──────────────────┴────────────┴──────────────┴───────────────┴─────────────────┴─────────────────────┴────────────────────┴──────────────┴──────────────────┴───────────┴───────────┴─────────────┴────────────┴─────────┴─────────┴──────────┴─────────────┴─────────┴──────┘
+
+======== Q25 ========
+   ┌─SearchPhrase──┐
+1. │ another query │
+2. │ test query    │
+   └───────────────┘
+
+======== Q26 ========
+   ┌─SearchPhrase──┐
+1. │ another query │
+2. │ test query    │
+   └───────────────┘
+
+======== Q27 ========
+   ┌─SearchPhrase──┐
+1. │ another query │
+2. │ test query    │
+   └───────────────┘
+
+======== Q28 ========
+
+======== Q29 ========
+
+======== Q30 ========
+   ┌─SUM(ResolutionWidth)─┬─SUM(plus(ResolutionWidth, 1))─┬─SUM(plus(ResolutionWidth, 2))─┬─SUM(plus(ResolutionWidth, 3))─┬─SUM(plus(ResolutionWidth, 4))─┬─SUM(plus(ResolutionWidth, 5))─┬─SUM(plus(ResolutionWidth, 6))─┬─SUM(plus(ResolutionWidth, 7))─┬─SUM(plus(ResolutionWidth, 8))─┬─SUM(plus(ResolutionWidth, 9))─┬─SUM(plus(ResolutionWidth, 10))─┬─SUM(plus(ResolutionWidth, 11))─┬─SUM(plus(ResolutionWidth, 12))─┬─SUM(plus(ResolutionWidth, 13))─┬─SUM(plus(ResolutionWidth, 14))─┬─SUM(plus(ResolutionWidth, 15))─┬─SUM(plus(ResolutionWidth, 16))─┬─SUM(plus(ResolutionWidth, 17))─┬─SUM(plus(ResolutionWidth, 18))─┬─SUM(plus(ResolutionWidth, 19))─┬─SUM(plus(ResolutionWidth, 20))─┬─SUM(plus(ResolutionWidth, 21))─┬─SUM(plus(ResolutionWidth, 22))─┬─SUM(plus(ResolutionWidth, 23))─┬─SUM(plus(ResolutionWidth, 24))─┬─SUM(plus(ResolutionWidth, 25))─┬─SUM(plus(ResolutionWidth, 26))─┬─SUM(plus(ResolutionWidth, 27))─┬─SUM(plus(ResolutionWidth, 28))─┬─SUM(plus(ResolutionWidth, 29))─┬─SUM(plus(ResolutionWidth, 30))─┬─SUM(plus(ResolutionWidth, 31))─┬─SUM(plus(ResolutionWidth, 32))─┬─SUM(plus(ResolutionWidth, 33))─┬─SUM(plus(ResolutionWidth, 34))─┬─SUM(plus(ResolutionWidth, 35))─┬─SUM(plus(ResolutionWidth, 36))─┬─SUM(plus(ResolutionWidth, 37))─┬─SUM(plus(ResolutionWidth, 38))─┬─SUM(plus(ResolutionWidth, 39))─┬─SUM(plus(ResolutionWidth, 40))─┬─SUM(plus(ResolutionWidth, 41))─┬─SUM(plus(ResolutionWidth, 42))─┬─SUM(plus(ResolutionWidth, 43))─┬─SUM(plus(ResolutionWidth, 44))─┬─SUM(plus(ResolutionWidth, 45))─┬─SUM(plus(ResolutionWidth, 46))─┬─SUM(plus(ResolutionWidth, 47))─┬─SUM(plus(ResolutionWidth, 48))─┬─SUM(plus(ResolutionWidth, 49))─┬─SUM(plus(ResolutionWidth, 50))─┬─SUM(plus(ResolutionWidth, 51))─┬─SUM(plus(ResolutionWidth, 52))─┬─SUM(plus(ResolutionWidth, 53))─┬─SUM(plus(ResolutionWidth, 54))─┬─SUM(plus(ResolutionWidth, 55))─┬─SUM(plus(ResolutionWidth, 56))─┬─SUM(plus(ResolutionWidth, 57))─┬─SUM(plus(ResolutionWidth, 58))─┬─SUM(plus(ResolutionWidth, 59))─┬─SUM(plus(ResolutionWidth, 60))─┬─SUM(plus(ResolutionWidth, 61))─┬─SUM(plus(ResolutionWidth, 62))─┬─SUM(plus(ResolutionWidth, 63))─┬─SUM(plus(ResolutionWidth, 64))─┬─SUM(plus(ResolutionWidth, 65))─┬─SUM(plus(ResolutionWidth, 66))─┬─SUM(plus(ResolutionWidth, 67))─┬─SUM(plus(ResolutionWidth, 68))─┬─SUM(plus(ResolutionWidth, 69))─┬─SUM(plus(ResolutionWidth, 70))─┬─SUM(plus(ResolutionWidth, 71))─┬─SUM(plus(ResolutionWidth, 72))─┬─SUM(plus(ResolutionWidth, 73))─┬─SUM(plus(ResolutionWidth, 74))─┬─SUM(plus(ResolutionWidth, 75))─┬─SUM(plus(ResolutionWidth, 76))─┬─SUM(plus(ResolutionWidth, 77))─┬─SUM(plus(ResolutionWidth, 78))─┬─SUM(plus(ResolutionWidth, 79))─┬─SUM(plus(ResolutionWidth, 80))─┬─SUM(plus(ResolutionWidth, 81))─┬─SUM(plus(ResolutionWidth, 82))─┬─SUM(plus(ResolutionWidth, 83))─┬─SUM(plus(ResolutionWidth, 84))─┬─SUM(plus(ResolutionWidth, 85))─┬─SUM(plus(ResolutionWidth, 86))─┬─SUM(plus(ResolutionWidth, 87))─┬─SUM(plus(ResolutionWidth, 88))─┬─SUM(plus(ResolutionWidth, 89))─┐
+1. │                 1920 │                          1925 │                          1930 │                          1935 │                          1940 │                          1945 │                          1950 │                          1955 │                          1960 │                          1965 │                           1970 │                           1975 │                           1980 │                           1985 │                           1990 │                           1995 │                           2000 │                           2005 │                           2010 │                           2015 │                           2020 │                           2025 │                           2030 │                           2035 │                           2040 │                           2045 │                           2050 │                           2055 │                           2060 │                           2065 │                           2070 │                           2075 │                           2080 │                           2085 │                           2090 │                           2095 │                           2100 │                           2105 │                           2110 │                           2115 │                           2120 │                           2125 │                           2130 │                           2135 │                           2140 │                           2145 │                           2150 │                           2155 │                           2160 │                           2165 │                           2170 │                           2175 │                           2180 │                           2185 │                           2190 │                           2195 │                           2200 │                           2205 │                           2210 │                           2215 │                           2220 │                           2225 │                           2230 │                           2235 │                           2240 │                           2245 │                           2250 │                           2255 │                           2260 │                           2265 │                           2270 │                           2275 │                           2280 │                           2285 │                           2290 │                           2295 │                           2300 │                           2305 │                           2310 │                           2315 │                           2320 │                           2325 │                           2330 │                           2335 │                           2340 │                           2345 │                           2350 │                           2355 │                           2360 │                           2365 │
+   └──────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┴────────────────────────────────┘
+
+======== Q31 ========
+   ┌─SearchEngineID─┬─ClientIP─┬─c─┬─SUM(IsRefresh)─┬─AVG(ResolutionWidth)─┐
+1. │              0 │        0 │ 2 │              0 │                  960 │
+   └────────────────┴──────────┴───┴────────────────┴──────────────────────┘
+
+======== Q32 ========
+   ┌─WatchID─┬─ClientIP─┬─c─┬─SUM(IsRefresh)─┬─AVG(ResolutionWidth)─┐
+1. │       3 │        0 │ 1 │              0 │                    0 │
+2. │       1 │        0 │ 1 │              0 │                 1920 │
+   └─────────┴──────────┴───┴────────────────┴──────────────────────┘
+
+======== Q33 ========
+   ┌─WatchID─┬─ClientIP─┬─c─┬─SUM(IsRefresh)─┬─AVG(ResolutionWidth)─┐
+1. │       5 │        0 │ 1 │              0 │                    0 │
+2. │       2 │        0 │ 1 │              1 │                    0 │
+3. │       3 │        0 │ 1 │              0 │                    0 │
+4. │       1 │        0 │ 1 │              0 │                 1920 │
+5. │       4 │        0 │ 1 │              0 │                    0 │
+   └─────────┴──────────┴───┴────────────────┴──────────────────────┘
+
+======== Q34 ========
+   ┌─URL──────────────────────────────────┬─c─┐
+1. │ https://news.google.com              │ 1 │
+2. │ https://www.example.org              │ 1 │
+3. │ https://google.com                   │ 1 │
+4. │ https://example.com                  │ 1 │
+5. │ https://www.google.com/search?q=test │ 1 │
+   └──────────────────────────────────────┴───┘
+
+======== Q35 ========
+   ┌─1─┬─URL──────────────────────────────────┬─c─┐
+1. │ 1 │ https://news.google.com              │ 1 │
+2. │ 1 │ https://www.example.org              │ 1 │
+3. │ 1 │ https://google.com                   │ 1 │
+4. │ 1 │ https://example.com                  │ 1 │
+5. │ 1 │ https://www.google.com/search?q=test │ 1 │
+   └───┴──────────────────────────────────────┴───┘
+
+======== Q36 ========
+   ┌─ClientIP─┬─minus(ClientIP, 1)─┬─minus(ClientIP, 2)─┬─minus(ClientIP, 3)─┬─c─┐
+1. │        0 │                 -1 │                 -2 │                 -3 │ 5 │
+   └──────────┴────────────────────┴────────────────────┴────────────────────┴───┘
+
+======== Q37 ========
+   ┌─URL──────────────────────────────────┬─PageViews─┐
+1. │ https://news.google.com              │         1 │
+2. │ https://www.example.org              │         1 │
+3. │ https://www.google.com/search?q=test │         1 │
+   └──────────────────────────────────────┴───────────┘
+
+======== Q38 ========
+   ┌─Title───────┬─PageViews─┐
+1. │ Google News │         1 │
+   └─────────────┴───────────┘
+
+======== Q39 ========
+
+======== Q40 ========
+
+======== Q41 ========
+
+======== Q42 ========
+
+======== Q43 ========
+
+Done (43 queries).
