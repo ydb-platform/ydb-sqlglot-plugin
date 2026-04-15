@@ -28,7 +28,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run unit tests
-        run: pytest tests/test_ydb.py
+        run: pytest tests/test_ydb.py tests/test_clickbench.py tests/test_tpch.py
 
   integration:
     name: Integration tests (YDB)
@@ -67,7 +67,7 @@ jobs:
           EOF
 
       - name: Run integration tests
-        run: pytest tests/test_integration.py -v
+        run: pytest tests/test_integration.py tests/test_clickbench_integration.py -v
 
       - name: Stop YDB
         if: always()

@@ -1,0 +1,14 @@
+# ClickHouse only — does not start with the repo-root compose (YDB integration tests).
+# Used for one-off ClickBench oracle runs: run_clickhouse_oracle.sh
+name: ydb-sqlglot-clickbench-oracle
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
