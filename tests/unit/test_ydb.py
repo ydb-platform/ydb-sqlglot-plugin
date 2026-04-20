@@ -5,7 +5,6 @@ from sqlglot.parser import logger as parser_logger
 
 from ydb_sqlglot.ydb import eliminate_join_marks, make_db_name_lower, table_names_to_lower_case
 
-
 # ---------------------------------------------------------------------------
 # Base validator (sqlglot convention)
 # ---------------------------------------------------------------------------
