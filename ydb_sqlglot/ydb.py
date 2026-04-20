@@ -440,6 +440,110 @@ def _has_implicit_cross_join(expression: exp.Expression) -> bool:
     return False
 
 
+class FlattenBy(exp.Expression):
+    """YDB-specific FLATTEN [LIST|DICT] BY clause on a table reference."""
+    arg_types = {"this": True, "expressions": True, "kind": False}
+
+
+class AssumeOrderBy(exp.Expression):
+    """YDB-specific ASSUME ORDER BY hint (data is pre-sorted, skip sort)."""
+    arg_types = {"this": True}
+
+
+class YdbTuple(exp.Expression):
+    """YDB Tuple<T1, T2, ...> type — positional unnamed fields."""
+    arg_types = {"expressions": True, "nullable": False}
+
+
+# Container types that use Generic<T, ...> syntax in YDB
+_YDB_GENERIC_TYPES = {
+    "List": exp.DataType.Type.LIST,
+    "Dict": exp.DataType.Type.MAP,
+    "Set": exp.DataType.Type.SET,
+}
+
+
+def _reassemble_ctes(
+    statements: t.List[t.Optional[exp.Expression]],
+) -> t.List[t.Optional[exp.Expression]]:
+    """Convert sequences of YDB named-expression statements into standard WITH CTEs.
+
+    YDB generator emits:  $t = (SELECT ...);  SELECT * FROM $t AS t
+    This function rebuilds:  WITH t AS (SELECT ...) SELECT * FROM t
+
+    so that transpiling YDB output to other dialects produces valid SQL.
+    """
+    result: t.List[t.Optional[exp.Expression]] = []
+    # Keep both the original Alias nodes and the converted CTE nodes
+    pending_aliases: t.List[exp.Alias] = []
+    pending_ctes: t.List[exp.CTE] = []
+    pending_names: t.Set[str] = set()
+
+    def _flush_as_aliases() -> None:
+        result.extend(pending_aliases)
+        pending_aliases.clear()
+        pending_ctes.clear()
+        pending_names.clear()
+
+    for stmt in statements:
+        if (
+            isinstance(stmt, exp.Alias)
+            and isinstance(stmt.args.get("alias"), exp.Identifier)
+            and stmt.alias.startswith("$")
+        ):
+            name = stmt.alias[1:]
+            inner = stmt.this
+            # Unwrap Subquery — CTE.this must be Select, not Subquery
+            if isinstance(inner, exp.Subquery):
+                inner = inner.this
+            # Replace any $prev_cte refs inside this CTE body
+            inner = _replace_param_table_refs(inner, pending_names)
+            pending_aliases.append(stmt)
+            pending_ctes.append(
+                exp.CTE(
+                    this=inner,
+                    alias=exp.TableAlias(this=exp.to_identifier(name)),
+                )
+            )
+            pending_names.add(name)
+        elif pending_ctes and isinstance(stmt, exp.Select):
+            stmt = _replace_param_table_refs(stmt, pending_names)
+            stmt.set("with_", exp.With(expressions=list(pending_ctes)))
+            result.append(stmt)
+            pending_aliases.clear()
+            pending_ctes.clear()
+            pending_names.clear()
+        else:
+            # No following SELECT — keep original Alias form
+            _flush_as_aliases()
+            result.append(stmt)
+
+    # Trailing named exprs without a SELECT — keep as-is
+    _flush_as_aliases()
+    return result
+
+
+def _replace_param_table_refs(
+    tree: exp.Expression, names: t.Set[str]
+) -> exp.Expression:
+    """Replace Table(Parameter(Var("t"))) with Table(Identifier("t")) for CTE names."""
+
+    def _transform(node: exp.Expression) -> exp.Expression:
+        if (
+            isinstance(node, exp.Table)
+            and isinstance(node.this, exp.Parameter)
+            and isinstance(node.this.this, exp.Var)
+            and node.this.this.name in names
+        ):
+            return exp.Table(
+                this=exp.to_identifier(node.this.this.name),
+                alias=node.args.get("alias"),
+            )
+        return node
+
+    return tree.transform(_transform)
+
+
 class YDB(Dialect):
     """
     YDB SQL dialect implementation for sqlglot.
@@ -470,9 +574,18 @@ class YDB(Dialect):
         Defines how the SQL text is broken into tokens.
         """
 
+        KEYWORDS = {
+            **tokens.Tokenizer.KEYWORDS,
+            "DECLARE": TokenType.DECLARE,
+            "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
+            "STRING": TokenType.BLOB,     # YDB String = bytes = SQL BLOB
+        }
+
         SINGLE_TOKENS = {
             **tokens.Tokenizer.SINGLE_TOKENS,
+            "$": TokenType.PARAMETER,
         }
+        VAR_SINGLE_TOKENS = {"$"}
 
         SUPPORTS_VALUES_DEFAULT = False
         QUOTES = ["'", '"']
@@ -480,6 +593,154 @@ class YDB(Dialect):
         IDENTIFIERS = ["`"]
 
     class Parser(parser.Parser):
+        COLUMN_OPERATORS = {
+            **parser.Parser.COLUMN_OPERATORS,
+            # In YDB :: is a module namespace separator (e.g. DateTime::GetYear),
+            # not a Postgres-style cast. Reparse the right side as a function call.
+            TokenType.DCOLON: lambda self, this, field: (
+                self.expression(
+                    exp.Anonymous(
+                        this=f"{this.name}::{field.name}",
+                        expressions=field.expressions,
+                    )
+                )
+                if isinstance(field, exp.Func)
+                else self.expression(exp.ScopeResolution(this=this, expression=field))
+            ),
+        }
+
+        STATEMENT_PARSERS = {
+            **parser.Parser.STATEMENT_PARSERS,
+            TokenType.DECLARE: lambda self: self._parse_ydb_declare(),
+            TokenType.PARAMETER: lambda self: self._parse_ydb_named_expr(),
+        }
+
+        def parse(self, raw_tokens, sql=None):
+            statements = super().parse(raw_tokens, sql)
+            return _reassemble_ctes(statements)
+
+        def _parse_dcolon(self) -> t.Optional[exp.Expression]:
+            return self._parse_function(anonymous=True) or self._parse_var(any_token=True)
+
+        def _parse_ydb_named_expr(self) -> t.Optional[exp.Expression]:
+            # _match_set already consumed '$', so _index points to the var name.
+            # Retreat one extra step to include '$' when falling back to expression parsing.
+            index = self._index - 1
+            name_var = self._parse_var(any_token=True)
+            if not self._match(TokenType.EQ):
+                # Not an assignment — retreat (including '$') and parse as expression.
+                self._retreat(index)
+                return self._parse_expression()
+            value = self._parse_select() or self._parse_expression()
+            return self.expression(
+                exp.Alias(
+                    this=value,
+                    alias=exp.Identifier(this=f"${name_var.name}"),
+                )
+            )
+
+        def _parse_ydb_declare(self) -> exp.Declare:
+            items = self._parse_csv(self._parse_ydb_declareitem)
+            return self.expression(exp.Declare(expressions=items))
+
+        def _parse_ydb_declareitem(self) -> t.Optional[exp.DeclareItem]:
+            if not self._match(TokenType.PARAMETER):
+                return None
+            name = self._parse_var(any_token=True)
+            if not name:
+                return None
+            self._match(TokenType.ALIAS)
+            kind = self._parse_types()
+            return self.expression(exp.DeclareItem(this=name, kind=kind))
+
+        def _parse_types(self, *args, **kwargs) -> t.Optional[exp.Expression]:
+            # YDB generic types use Name<...> syntax; token type varies by keyword status
+            if self._curr and self._next and self._next.token_type == TokenType.LT:
+                name = self._curr.text
+
+                if name == "Optional":
+                    self._advance()  # consume 'Optional'
+                    self._advance()  # consume '<'
+                    inner = self._parse_types(*args, **kwargs)
+                    self._match(TokenType.GT)
+                    if inner:
+                        inner.set("nullable", True)
+                    return inner
+
+                if name in _YDB_GENERIC_TYPES:
+                    self._advance()  # consume type name
+                    self._advance()  # consume '<'
+                    type_args = self._parse_csv(
+                        lambda: self._parse_types(*args, **kwargs)
+                    )
+                    self._match(TokenType.GT)
+                    return exp.DataType(
+                        this=_YDB_GENERIC_TYPES[name],
+                        expressions=[a for a in type_args if a],
+                        nested=True,
+                    )
+
+                if name == "Tuple":
+                    self._advance()  # consume 'Tuple'
+                    self._advance()  # consume '<'
+                    type_args = self._parse_csv(
+                        lambda: self._parse_types(*args, **kwargs)
+                    )
+                    self._match(TokenType.GT)
+                    # Represent as STRUCT so other dialects can serialize it.
+                    # kind="tuple" is a YDB-specific marker for the generator to emit Tuple<...>.
+                    return exp.DataType(
+                        this=exp.DataType.Type.STRUCT,
+                        expressions=[
+                            exp.ColumnDef(this=exp.to_identifier(f"_{i}"), kind=a)
+                            for i, a in enumerate(type_args) if a
+                        ],
+                        nested=True,
+                        kind=exp.Var(this="tuple"),
+                    )
+
+            dtype = super()._parse_types(*args, **kwargs)
+            if dtype and self._match(TokenType.PLACEHOLDER):  # T?
+                dtype.set("nullable", True)
+            return dtype
+
+        def _parse_table_alias(self, alias_tokens=None):
+            # Prevent YDB-specific keywords from being consumed as table aliases
+            if self._curr and self._curr.text.upper() in ("FLATTEN", "ASSUME"):
+                # Also check that what follows is a YDB construct, not a regular alias
+                if self._next and (
+                    self._next.text.upper() in ("BY", "LIST", "DICT")
+                    or self._next.token_type == TokenType.ORDER_BY
+                ):
+                    return None
+            return super()._parse_table_alias(alias_tokens=alias_tokens)
+
+        def _parse_query_modifiers(self, this):
+            if (
+                self._curr
+                and self._curr.text.upper() == "ASSUME"
+                and self._next
+                and self._next.token_type == TokenType.ORDER_BY
+            ):
+                self._advance()  # consume ASSUME
+                _, order = self.QUERY_MODIFIER_PARSERS[TokenType.ORDER_BY](self)
+                if order and this:
+                    this.set("order", self.expression(AssumeOrderBy(this=order)))
+            return super()._parse_query_modifiers(this)
+
+        def _parse_table(self, *args, **kwargs) -> t.Optional[exp.Expression]:
+            table = super()._parse_table(*args, **kwargs)
+            if table and self._curr and self._curr.text.upper() == "FLATTEN":
+                self._advance()
+                kind: t.Optional[str] = None
+                if self._curr and self._curr.text.upper() in ("LIST", "DICT"):
+                    kind = self._curr.text.upper()
+                    self._advance()
+                self._match_text_seq("BY")
+                cols = self._parse_csv(self._parse_column)
+                return self.expression(FlattenBy(this=table, expressions=cols, kind=kind))
+            return table
+
         def _parse_struct_types(self, type_required=True) -> t.Optional[exp.Expression]:
             if not self._curr:
                 return None
@@ -559,6 +820,8 @@ class YDB(Dialect):
         Responsible for translating SQL AST back to SQL text with YDB-specific syntax.
         """
 
+        PARAMETER_TOKEN = "$"
+
         SUPPORTS_VALUES_DEFAULT = False
         NORMALIZATION_STRATEGY = NormalizationStrategy.CASE_SENSITIVE
         JOIN_HINTS = False
@@ -574,7 +837,7 @@ class YDB(Dialect):
         JSON_KEY_VALUE_PAIR_SEP = ","
         VARCHAR_REQUIRES_SIZE = False
         CAN_IMPLEMENT_ARRAY_ANY = True
-        STRUCT_DELIMITER = ("<|", "|>")
+        STRUCT_DELIMITER = ("<", ">")
         NULL_ORDERING_SUPPORTED: t.Optional[bool] = False
         NULL_ORDERING = None
         MATCHED_BY_SOURCE = False
@@ -637,6 +900,10 @@ class YDB(Dialect):
             Returns:
                 Generated SQL string for the table reference
             """
+            if isinstance(expression.this, exp.Parameter):
+                var = self.sql(expression, "this")
+                alias = f" AS {expression.alias}" if expression.alias else ""
+                return f"{var}{alias}"
             prefix = f"{expression.db}/" if expression.db else ""
             sql = f"`{prefix}{expression.name}`"
 
@@ -662,6 +929,38 @@ class YDB(Dialect):
                 is_sql = self.wrap(is_sql)
 
             return is_sql
+
+        def scoperesolution_sql(self, expression: exp.ScopeResolution) -> str:
+            this = self.sql(expression, "this")
+            expr = self.sql(expression, "expression")
+            return f"{this}::{expr}"
+
+        def declareitem_sql(self, expression: exp.DeclareItem) -> str:
+            name = self.sql(expression, "this")
+            kind = self.sql(expression, "kind")
+            return f"${name} AS {kind}"
+
+        def flattenby_sql(self, expression: FlattenBy) -> str:
+            table = self.sql(expression, "this")
+            kind = expression.args.get("kind")
+            kind_str = f" {kind}" if kind else ""
+            cols = self.expressions(expression, flat=True)
+            return f"{table} FLATTEN{kind_str} BY {cols}"
+
+        def assumeorderby_sql(self, expression: AssumeOrderBy) -> str:
+            order = self.sql(expression, "this").lstrip()
+            return self.seg(f"ASSUME {order}")
+
+        def ydbtuple_sql(self, expression: YdbTuple) -> str:
+            inner = ", ".join(self.sql(e) for e in expression.expressions)
+            sql = f"Tuple<{inner}>"
+            return f"Optional<{sql}>" if expression.args.get("nullable") else sql
+
+        def alias_sql(self, expression: exp.Alias) -> str:
+            alias = expression.args.get("alias")
+            if alias and alias.name.startswith("$"):
+                return f"{alias.name} = {self.sql(expression, 'this')}"
+            return super().alias_sql(expression)
 
         def anonymous_sql(self, expression: exp.Anonymous) -> str:
             """
@@ -799,6 +1098,35 @@ class YDB(Dialect):
             Returns:
                 Generated SQL string for the data type
             """
+            nullable = expression.args.get("nullable")
+
+            # YDB generic container types rendered with <> syntax and correct casing
+            if expression.args.get("nested"):
+                type_value = expression.this
+                # Tuple<...>: STRUCT with kind="tuple" marker
+                if (
+                    type_value == exp.DataType.Type.STRUCT
+                    and isinstance(expression.args.get("kind"), exp.Var)
+                    and expression.args["kind"].name == "tuple"
+                ):
+                    inner = ", ".join(
+                        self.sql(col.args["kind"])
+                        for col in expression.expressions
+                        if isinstance(col, exp.ColumnDef)
+                    )
+                    sql = f"Tuple<{inner}>"
+                    return f"Optional<{sql}>" if nullable else sql
+
+                inner = ", ".join(self.sql(e) for e in expression.expressions)
+                name = {
+                    exp.DataType.Type.LIST: "List",
+                    exp.DataType.Type.MAP: "Dict",
+                    exp.DataType.Type.SET: "Set",
+                }.get(type_value)
+                if name:
+                    sql = f"{name}<{inner}>"
+                    return f"Optional<{sql}>" if nullable else sql
+
             if (
                     expression.is_type(exp.DataType.Type.NVARCHAR)
                     or expression.is_type(exp.DataType.Type.VARCHAR)
@@ -845,7 +1173,10 @@ class YDB(Dialect):
                         exp.DataType.build("float") if size <= 32 else exp.DataType.build("double")
                     )
 
-            return super().datatype_sql(expression)
+            sql = super().datatype_sql(expression)
+            if nullable:
+                sql = f"Optional<{sql}>"
+            return sql
 
         def primarykeycolumnconstraint_sql(self, expression: exp.PrimaryKeyColumnConstraint) -> str:
             """
@@ -2358,10 +2689,10 @@ class YDB(Dialect):
         TYPE_MAPPING = {
             **generator.Generator.TYPE_MAPPING,
             **STRING_TYPE_MAPPING,
-            exp.DataType.Type.TINYINT: "INT8",
-            exp.DataType.Type.SMALLINT: "INT16",
-            exp.DataType.Type.INT: "INT32",
-            exp.DataType.Type.BIGINT: "INT64",
+            exp.DataType.Type.TINYINT: "Int8",
+            exp.DataType.Type.SMALLINT: "Int16",
+            exp.DataType.Type.INT: "Int32",
+            exp.DataType.Type.BIGINT: "Int64",
             exp.DataType.Type.DECIMAL: "Decimal",
             exp.DataType.Type.FLOAT: "Float",
             exp.DataType.Type.DOUBLE: "Double",
@@ -2373,6 +2704,9 @@ class YDB(Dialect):
 
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
+            FlattenBy: lambda self, e: self.flattenby_sql(e),
+            AssumeOrderBy: lambda self, e: self.assumeorderby_sql(e),
+            YdbTuple: lambda self, e: self.ydbtuple_sql(e),
             exp.Create: create_sql,
             exp.DefaultColumnConstraint: lambda self, e: "",
             exp.DateTrunc: _date_trunc_sql,

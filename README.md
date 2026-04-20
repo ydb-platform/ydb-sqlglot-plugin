@@ -1,6 +1,6 @@
 # ydb-sqlglot-plugin
 
-YDB dialect plugin for [sqlglot](https://github.com/tobymao/sqlglot) — transpiles SQL from any dialect into YDB/YQL.
+YDB dialect plugin for [sqlglot](https://github.com/tobymao/sqlglot) — bidirectional transpilation between YDB/YQL and any SQL dialect.
 
 ## Installation
 
@@ -15,19 +15,20 @@ After installing the package, the `ydb` dialect is available in sqlglot automati
 ```python
 import sqlglot
 
-# Transpile from any dialect
+# Any dialect → YDB
 result = sqlglot.transpile("SELECT * FROM users WHERE id = 1", read="mysql", write="ydb")[0]
 # → SELECT * FROM `users` WHERE id = 1
 
-# Or parse first, then generate
-query = "SELECT * FROM orders WHERE user_id = 1"
-parsed = sqlglot.parse_one(query, dialect="postgres")
-yql = parsed.sql(dialect="ydb")
+# YDB → any dialect
+result = sqlglot.transpile("$t = (SELECT id FROM users); SELECT * FROM $t AS t", read="ydb", write="postgres")[0]
+# → WITH t AS (SELECT id FROM users) SELECT * FROM t AS t
 ```
 
 ## What the plugin does
 
-### Table names
+### Any SQL → YDB
+
+#### Table names
 
 Database-qualified names are rewritten to the YDB path format and wrapped in backticks:
 
@@ -39,7 +40,7 @@ SELECT * FROM analytics.events
 SELECT * FROM `analytics/events`
 ```
 
-### CTEs → YDB variables
+#### CTEs → YDB variables
 
 ```sql
 -- input
@@ -52,7 +53,7 @@ $active = (SELECT * FROM `users` WHERE status = 'active');
 SELECT * FROM $active AS active
 ```
 
-### Subquery decorrelation
+#### Subquery decorrelation
 
 Correlated subqueries (which YQL does not support) are rewritten as JOINs:
 
@@ -73,6 +74,52 @@ LEFT JOIN (
 ```
 
 The same rewriting applies to `EXISTS`, `IN (subquery)`, and `ANY/ALL` subqueries.
+
+---
+
+### YDB → any SQL
+
+The plugin parses YDB/YQL back into sqlglot's AST, enabling round-trips, YDB-to-YDB transformations, and transpilation to other dialects.
+
+#### Supported YQL constructs
+
+| Construct | Example |
+|---|---|
+| `$variable` references | `SELECT * FROM $t AS t` |
+| `Module::Function()` | `DateTime::GetYear(ts)` |
+| `DECLARE $p AS Type` | `DECLARE $p AS Int32` |
+| `FLATTEN [LIST\|DICT] BY col` | `FROM t FLATTEN LIST BY col` |
+| `Optional<T>` / `T?` | `CAST(x AS Optional<Utf8>)` |
+| Container types | `CAST(x AS List<Int32>)`, `Dict<Utf8, Int64>`, `Set<Utf8>`, `Tuple<Int32, Utf8>` |
+| `ASSUME ORDER BY` | `SELECT * FROM t ASSUME ORDER BY id` |
+| Named expressions | `$t = (SELECT 1 AS x)` |
+| `PRAGMA` | `PRAGMA AnsiImplicitCrossJoin` |
+
+Table names without backticks are accepted on input; the generator always produces backtick-quoted output.
+
+#### CTEs reassembly
+
+YDB-style named expressions are automatically reassembled into standard `WITH` CTEs when targeting other dialects:
+
+```python
+ydb_sql = "$t = (SELECT 1 AS x); SELECT * FROM $t AS t"
+parse_one(ydb_sql, dialect="ydb").sql(dialect="postgres")
+# → WITH t AS (SELECT 1 AS x) SELECT * FROM t AS t
+```
+
+---
+
+### Column lineage
+
+Because YDB SQL is fully parsed into sqlglot's AST, column-level lineage works out of the box:
+
+```python
+from sqlglot.lineage import lineage
+
+node = lineage("total", "$orders = (SELECT user_id, amount FROM orders); SELECT SUM(amount) AS total FROM $orders AS o", dialect="ydb")
+for dep in node.walk():
+    print(dep.name, "→", dep.source)
+```
 
 ---
 
@@ -153,24 +200,42 @@ Functions below are recognized by sqlglot as standard SQL expressions and transl
 
 ## Type mapping
 
-| SQL type | YQL type |
+### Standard SQL → YDB
+
+| SQL type | YDB type |
 |---|---|
-| `TINYINT` | `INT8` |
-| `SMALLINT` | `INT16` |
-| `INT` / `INTEGER` | `INT32` |
-| `BIGINT` | `INT64` |
+| `TINYINT` | `Int8` |
+| `SMALLINT` | `Int16` |
+| `INT` / `INTEGER` | `Int32` |
+| `BIGINT` | `Int64` |
 | `FLOAT` | `Float` |
 | `DOUBLE` / `DOUBLE PRECISION` | `Double` |
 | `DECIMAL(p, s)` | `Decimal(p, s)` |
 | `BOOLEAN` / `BIT` | `Uint8` |
 | `TIMESTAMP` | `Timestamp` |
-| `VARCHAR` / `NVARCHAR` / `CHAR` | `Utf8` |
-| `TEXT` / `TINYTEXT` / `MEDIUMTEXT` / `LONGTEXT` | `Utf8` |
-| `BLOB` / `TINYBLOB` / `MEDIUMBLOB` / `LONGBLOB` / `VARBINARY` | `String` |
+| `VARCHAR` / `NVARCHAR` / `CHAR` / `TEXT` | `Utf8` |
+| `BLOB` / `BINARY` / `VARBINARY` | `String` |
+
+### YDB types → standard SQL
+
+| YDB type | Standard SQL | Postgres | ClickHouse |
+|---|---|---|---|
+| `Utf8` | `TEXT` | `TEXT` | `String` |
+| `String` | `BLOB` | `BYTEA` | `String` |
+| `Int32` | `INT` | `INT` | `Int32` |
+| `Int64` | `BIGINT` | `BIGINT` | `Int64` |
+| `Optional<T>` | `T` (nullable) | `T` | `Nullable(T)` |
+| `List<T>` | `LIST<T>` | `LIST<T>` | `Array(T)` |
+| `Dict<K,V>` | `MAP<K,V>` | `MAP<K,V>` | `Map(K,V)` |
+| `Tuple<T1,T2>` | `STRUCT<...>` | `STRUCT<...>` | `Tuple(T1,T2)` |
 
 ---
 
 ## Limitations
+
+### Dialect-specific functions
+
+Functions that sqlglot does not parse into typed AST nodes are passed through unchanged and must be replaced manually. Common examples from ClickHouse: `now()`, `today()`, `parseDateTimeBestEffort()`, `toDate()`, `toFloat64()`, `toString()`, `countDistinct()`, `groupArray()`.
 
 ### Correlated subqueries in DML
 
@@ -190,6 +255,10 @@ Correlated subqueries inside `SELECT` are handled automatically via JOIN rewriti
 ### `dateDiff` with month granularity
 
 `dateDiff('month', a, b)` has no exact equivalent in YDB because months have variable length. Use `DateTime::ShiftMonths` for date arithmetic instead.
+
+### YDB container types in other dialects
+
+`Uint8`/`Uint16`/`Uint32`/`Uint64` and YDB-specific container types (`Struct<...>`, `Variant<...>`, `Enum<...>`) do not have direct equivalents in standard SQL and are passed through as-is when targeting other dialects.
 
 ---
 
