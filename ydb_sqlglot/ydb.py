@@ -371,6 +371,75 @@ def _other_operand(expression):
     return None
 
 
+def _simplify_double_not(expression: exp.Expression) -> None:
+    """Simplify NOT NOT x → x in-place.
+
+    YDB does not accept ``NOT NOT (expr)`` syntax.  This pattern can appear
+    after subquery unnesting when an EXISTS predicate is wrapped in a NOT IN
+    context, producing a double negation like ``NOT NOT (_u_1.key IS NULL)``.
+    We remove both NOTs to restore the original semantics.
+    """
+    for node in list(expression.walk()):
+        if isinstance(node, exp.Not) and isinstance(node.this, exp.Not):
+            node.replace(node.this.this.copy())
+
+
+def _apply_subquery_alias_columns(expression: exp.Expression) -> None:
+    """Apply subquery alias column names to the SELECT columns in-place.
+
+    SQL allows: ``(SELECT a, b FROM ...) AS t (x, y)`` — aliases ``x`` and ``y``
+    rename the SELECT's output columns.  YDB does not support this column-list
+    syntax on subquery aliases (``SUPPORTS_TABLE_ALIAS_COLUMNS = False``), so we
+    inline the aliases directly on the SELECT expressions before generation.
+    """
+    for subquery in list(expression.find_all(exp.Subquery)):
+        alias = subquery.args.get("alias")
+        if not isinstance(alias, exp.TableAlias):
+            continue
+        col_list = alias.columns
+        if not col_list:
+            continue
+        inner = subquery.this
+        if not isinstance(inner, exp.Select):
+            continue
+        if len(col_list) != len(inner.expressions):
+            continue
+        new_exprs = []
+        for sel_expr, col_id in zip(inner.expressions, col_list):
+            alias_name = col_id.name if hasattr(col_id, "name") else str(col_id)
+            if not alias_name:
+                new_exprs.append(sel_expr)
+                continue
+            if isinstance(sel_expr, exp.Alias):
+                new_sel = sel_expr.copy()
+                new_sel.set("alias", exp.to_identifier(alias_name))
+            else:
+                new_sel = exp.alias_(sel_expr.copy(), alias_name)
+            new_exprs.append(new_sel)
+        inner.set("expressions", new_exprs)
+        alias.set("columns", [])
+
+
+def _has_implicit_cross_join(expression: exp.Expression) -> bool:
+    """Return True if the expression tree contains an implicit cross join.
+
+    An implicit cross join arises from comma-separated FROM tables, e.g.
+    ``FROM t1, t2``.  In the sqlglot AST this appears as a ``Join`` node
+    with no ``kind``, no ``on`` clause, and no ``using`` clause.
+    YDB disables implicit cross joins by default; callers can prepend
+    ``PRAGMA AnsiImplicitCrossJoin;`` when this returns True.
+    """
+    for node in expression.walk():
+        if isinstance(node, exp.Join):
+            if (
+                not node.args.get("kind")
+                and not node.args.get("on")
+                and not node.args.get("using")
+            ):
+                return True
+    return False
+
+
 class YDB(Dialect):
     """
     YDB SQL dialect implementation for sqlglot.
@@ -830,7 +899,28 @@ class YDB(Dialect):
                 output = ""
 
                 for cte in all_ctes:
-                    cte_sql = self.sql(cte.this)
+                    cte_body = cte.this.copy()
+                    # Apply CTE column aliases (WITH name (col1, col2) AS (...)) to the
+                    # SELECT expressions, because YDB's $var = (...) form doesn't support
+                    # a column list and outer queries reference the aliased names.
+                    cte_alias = cte.args.get("alias")
+                    if isinstance(cte_alias, exp.TableAlias):
+                        col_list = cte_alias.columns
+                        if col_list and len(col_list) == len(cte_body.expressions):
+                            new_exprs = []
+                            for sel_expr, col_id in zip(cte_body.expressions, col_list):
+                                alias_name = col_id.name if hasattr(col_id, "name") else str(col_id)
+                                if not alias_name:
+                                    new_exprs.append(sel_expr)
+                                    continue
+                                if isinstance(sel_expr, exp.Alias):
+                                    new_sel = sel_expr.copy()
+                                    new_sel.set("alias", exp.to_identifier(alias_name))
+                                else:
+                                    new_sel = exp.alias_(sel_expr.copy(), alias_name)
+                                new_exprs.append(new_sel)
+                            cte_body.set("expressions", new_exprs)
+                    cte_sql = self.sql(cte_body)
                     output += f"${cte.alias_or_name} = ({cte_sql});\n\n"
 
                 body_sql = self.sql(expression)
@@ -964,17 +1054,12 @@ class YDB(Dialect):
             self.unnest_subqueries(expression)
             expression = eliminate_join_marks(expression)
             expression = expression.copy() if copy else expression
+            _simplify_double_not(expression)
+            _apply_subquery_alias_columns(expression)
             _cast_date_string_literals(expression)
             _alias_order_by_aggregates(expression)
             _expand_positional_group_by(expression)
             _wrap_udf_group_by(expression)
-
-            # Without pragmas, some queries may not work - for example, implicit cross joins are disabled by default.
-            # pragma_statements = []
-            #
-            # if isinstance(expression, (exp.Select, exp.Insert, exp.Update, exp.Delete, exp.Create)):
-            #     pragma_statements = ['PRAGMA AnsiImplicitCrossJoin;',
-            #                          'PRAGMA AnsiInForEmptyOrNullableItemsCollections;']
 
             if not isinstance(expression, exp.Create) or (
                     isinstance(expression, exp.Create)
@@ -985,9 +1070,12 @@ class YDB(Dialect):
             else:
                 sql = self._generate_create_table(expression)
 
-            # can be uncommented to support comparisons of optional types with non-optional
-            # wrap_lambda = '$wrap_non_optional_in_comparisons = ($column) -> {RETURN IF(FormatType(TypeOf($column)) LIKE "Optional<%", $column, Just($column))};\n\n'
-            # return "\n".join(pragma_statements) + "\n" + wrap_lambda + sql
+            # Prepend PRAGMA AnsiImplicitCrossJoin only when the query contains
+            # implicit cross joins (FROM t1, t2 syntax).  YDB disables them by
+            # default; the pragma restores standard SQL semantics.
+            if _has_implicit_cross_join(expression):
+                sql = "PRAGMA AnsiImplicitCrossJoin;\n" + sql
+
             return sql
 
         def unnest_subqueries(self, expression):
@@ -1168,6 +1256,14 @@ class YDB(Dialect):
                 return
 
             if select.find(exp.Limit, exp.Offset):
+                return
+
+            # YDB supports NOT IN (SELECT ...) natively for non-correlated subqueries.
+            # Unnesting NOT IN produces an unqualified column in the JOIN ON clause which
+            # YDB rejects with "JOIN: column requires correlation name".  Since unnest()
+            # is only called for non-correlated subqueries (correlated ones go through
+            # decorrelate()), we can safely pass NOT IN through to YDB unchanged.
+            if isinstance(predicate, exp.In) and isinstance(predicate.parent, exp.Not):
                 return
 
             if isinstance(predicate, exp.Any):
@@ -1782,8 +1878,21 @@ class YDB(Dialect):
                 return super().join_sql(expression)
 
             if on_condition:
+                # For OUTER JOINs (LEFT / RIGHT / FULL), keep the entire ON clause intact.
+                # Moving non-equality conditions from ON to WHERE changes the semantics:
+                # in a LEFT JOIN, a non-equality filter in ON still produces a row for the
+                # left-side record (with NULLs on the right), whereas the same filter in
+                # WHERE would eliminate that row.  Pass outer-join ON clauses through
+                # unchanged; YDB accepts non-equality predicates in OUTER JOIN ON.
+                join_is_outer = any(
+                    k in (expression.side or "").upper()
+                    for k in ["LEFT", "RIGHT", "FULL"]
+                )
+                if join_is_outer:
+                    return super().join_sql(expression)
+
                 # Extract all non-equality conditions (including those with literals)
-                # YDB only allows equality predicates in JOIN ON
+                # YDB only allows equality predicates in INNER/CROSS JOIN ON
                 literal_conditions: list[Expression] = []
                 non_equality_conditions: list[Expression] = []
                 equality_conditions: list[Expression] = []
@@ -1799,14 +1908,16 @@ class YDB(Dialect):
                         # Check if it's a true equi-join (columns from different tables)
                         left = cond.this
                         right = cond.expression
+                        left_table = getattr(left, "table", None) if isinstance(left, exp.Column) else None
+                        right_table = getattr(right, "table", None) if isinstance(right, exp.Column) else None
                         if (
                                 isinstance(left, exp.Column)
                                 and isinstance(right, exp.Column)
-                                and hasattr(left, "table")
-                                and hasattr(right, "table")
-                                and left.table
-                                and right.table
-                                and left.table != right.table
+                                # At least one side must be table-qualified and they must differ
+                                # (this covers cases where one side has no qualifier, e.g.
+                                #  ps_suppkey = _u_1.s_suppkey from NOT IN unnesting)
+                                and (left_table or right_table)
+                                and left_table != right_table
                         ):
                             equality_conditions.append(cond)
                         else:
@@ -1965,6 +2076,38 @@ class YDB(Dialect):
                     raise ValueError(f"Unsupported interval type: {unit.name}")
 
                 return f"{source} {op} {interval_expr}"
+
+        def add_sql(self, expression: exp.Add) -> str:
+            """
+            Intercept date + INTERVAL n YEAR/MONTH before the default Add handler.
+            YDB has no native YEAR/MONTH interval; use DateTime::ShiftYears/ShiftMonths.
+            """
+            return self._maybe_shift_date(expression, op="+") or super().add_sql(expression)
+
+        def sub_sql(self, expression: exp.Sub) -> str:
+            """
+            Intercept date - INTERVAL n YEAR/MONTH (same as add_sql but subtraction).
+            """
+            return self._maybe_shift_date(expression, op="-") or super().sub_sql(expression)
+
+        def _maybe_shift_date(self, expression: exp.Expression, op: str) -> str:
+            """
+            If expression is (date_expr ± INTERVAL n YEAR/MONTH), rewrite as
+            DateTime::MakeDate(DateTime::ShiftYears/ShiftMonths(date_expr, ±n)).
+            Returns empty string when the pattern does not match.
+            """
+            left = expression.this
+            right = expression.expression if hasattr(expression, "expression") else expression.right
+            if not isinstance(right, exp.Interval):
+                return ""
+            unit = right.text("unit").upper()
+            if unit not in ("YEAR", "YEARS", "MONTH"):
+                return ""
+            value = right.text("this").strip("'")
+            source = self.sql(left)
+            n = f"-{value}" if op == "-" else value
+            fn = "ShiftYears" if unit in ("YEAR", "YEARS") else "ShiftMonths"
+            return f"DateTime::MakeDate(DateTime::{fn}({source}, {n}))"
 
         def interval_sql(self, expression: exp.Interval) -> str:
             """

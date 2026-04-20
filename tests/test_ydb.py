@@ -94,11 +94,15 @@ class TestYDBIdentity(Validator):
             "SELECT * FROM `a` LEFT JOIN `b` ON a.id = b.id",
             "SELECT * FROM `a` RIGHT JOIN `b` ON a.id = b.id",
             "SELECT * FROM `a` FULL JOIN `b` ON a.id = b.id",
-            "SELECT * FROM `a`, `b`",
         ]
         for sql in cases:
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
+        # Implicit cross join requires PRAGMA AnsiImplicitCrossJoin
+        self.validate_identity(
+            "SELECT * FROM `a`, `b`",
+            write_sql="PRAGMA AnsiImplicitCrossJoin;\nSELECT * FROM `a`, `b`",
+        )
 
     def test_set_operations(self):
         cases = [
@@ -457,6 +461,7 @@ class TestYDBTransforms(Validator):
         sql = "SELECT CASE WHEN a = 1 THEN (SELECT MAX(b) FROM t2 WHERE t2.a = t1.a) ELSE 0 END as val FROM t1"
         self.assertEqual(
             ydb(sql),
+            "PRAGMA AnsiImplicitCrossJoin;\n"
             "SELECT CASE WHEN a = 1 THEN _u_1._col0 ELSE 0 END AS val FROM `t1`, "
             "(SELECT MAX(b) AS _col0 FROM `t2` WHERE t2.a = t1.a) AS _u_1",
         )
@@ -465,6 +470,7 @@ class TestYDBTransforms(Validator):
         sql = "SELECT CASE WHEN a = 1 THEN 100 ELSE (SELECT MIN(b) FROM t2 WHERE t2.a = t1.a) END as val FROM t1"
         self.assertEqual(
             ydb(sql),
+            "PRAGMA AnsiImplicitCrossJoin;\n"
             "SELECT CASE WHEN a = 1 THEN 100 ELSE _u_1._col0 END AS val FROM `t1`, "
             "(SELECT MIN(b) AS _col0 FROM `t2` WHERE t2.a = t1.a) AS _u_1",
         )
