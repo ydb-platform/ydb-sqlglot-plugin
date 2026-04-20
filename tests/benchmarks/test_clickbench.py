@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from sqlglot import parse_one
 
-QUERIES_FILE = Path(__file__).parent / "fixtures" / "clickbench" / "queries.sql"
+QUERIES_FILE = Path(__file__).parent.parent / "fixtures" / "clickbench" / "queries.sql"
 
 _queries = [q.strip() for q in QUERIES_FILE.read_text().splitlines() if q.strip()]
 

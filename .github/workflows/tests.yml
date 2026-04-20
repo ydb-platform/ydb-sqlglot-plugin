@@ -28,7 +28,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run unit tests
-        run: pytest tests/test_ydb.py
+        run: pytest tests/unit/
 
   integration:
     name: Integration tests (YDB)
@@ -67,14 +67,14 @@ jobs:
           EOF
 
       - name: Run integration tests
-        run: pytest tests/test_integration.py -v
+        run: pytest tests/integration/ -v
 
       - name: Stop YDB
         if: always()
         run: docker compose down
 
   benchmarks:
-    name: Benchmark tests (ClickBench + TPC-H)
+    name: Benchmark tests
     runs-on: ubuntu-latest
 
     steps:
@@ -89,12 +89,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-
-      - name: Run ClickBench unit tests
-        run: pytest tests/test_clickbench.py
-
-      - name: Run TPC-H unit tests
-        run: pytest tests/test_tpch.py
 
       - name: Start YDB
         run: docker compose up -d
@@ -115,11 +109,8 @@ jobs:
           sys.exit(1)
           EOF
 
-      - name: Run ClickBench integration tests
-        run: pytest tests/test_clickbench_integration.py -v
-
-      - name: Run TPC-H integration tests
-        run: pytest tests/test_tpch_integration.py -v
+      - name: Run benchmark tests
+        run: pytest tests/benchmarks/ -v
 
       - name: Stop YDB
         if: always()

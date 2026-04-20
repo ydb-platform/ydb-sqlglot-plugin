@@ -21,7 +21,7 @@ from tests.fixtures.tpch.oracle_compare import (
     assert_matches_postgres,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures" / "tpch"
+FIXTURES = Path(__file__).parent.parent / "fixtures" / "tpch"
 QUERIES_FILE = FIXTURES / "queries.sql"
 
 _queries = [q.strip() for q in QUERIES_FILE.read_text().split("---") if q.strip()]

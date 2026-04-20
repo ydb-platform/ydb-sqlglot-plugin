@@ -18,7 +18,7 @@ from tests.fixtures.clickbench.oracle_compare import (
     assert_matches_clickhouse,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures" / "clickbench"
+FIXTURES = Path(__file__).parent.parent / "fixtures" / "clickbench"
 QUERIES_FILE = FIXTURES / "queries.sql"
 
 _queries = [q.strip() for q in QUERIES_FILE.read_text().splitlines() if q.strip()]
