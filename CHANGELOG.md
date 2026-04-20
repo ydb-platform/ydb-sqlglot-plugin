@@ -1,3 +1,5 @@
+* Basic parser
+
 ## 0.1.1 ##
 * Integration tests and small fixes
 * Clickbench validation & TPC-H validation draft
