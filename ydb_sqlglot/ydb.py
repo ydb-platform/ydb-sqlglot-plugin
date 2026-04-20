@@ -1,16 +1,14 @@
 import re
 import typing as t
 
-from sqlglot import exp, tokens, generator, transforms, TokenType, parser, Generator
+from sqlglot import Generator, TokenType, exp, generator, parser, tokens, transforms
+from sqlglot.dialects.dialect import Dialect, NormalizationStrategy, concat_to_dpipe_sql, unit_to_var
 from sqlglot.errors import UnsupportedError
 from sqlglot.expressions import Expression
-from sqlglot.dialects.dialect import Dialect, unit_to_var
-from sqlglot.dialects.dialect import NormalizationStrategy, concat_to_dpipe_sql
-from sqlglot.helper import name_sequence, seq_get, flatten
+from sqlglot.helper import flatten, name_sequence, seq_get
+from sqlglot.optimizer.scope import ScopeType, find_in_scope, traverse_scope
 from sqlglot.optimizer.simplify import simplify
-from sqlglot.transforms import move_ctes_to_top_level
-from sqlglot.optimizer.scope import find_in_scope, ScopeType, traverse_scope
-from sqlglot.transforms import eliminate_join_marks
+from sqlglot.transforms import eliminate_join_marks, move_ctes_to_top_level
 
 JOIN_ATTRS = ("on", "side", "kind", "using", "method")
 
@@ -26,21 +24,6 @@ def table_names_to_lower_case(expression: exp.Expression) -> exp.Expression:
         if isinstance(table.this, exp.Identifier):
             ident = table.this
             table.set("this", ident.this.lower())
-    return expression
-
-
-def make_db_name_lower(expression: exp.Expression) -> exp.Expression:
-    """
-    Converts all database names to uppercase
-    Args:
-        expression: The SQL expression to modify
-    Returns:
-        Modified expression with uppercase database names
-    """
-    for table in expression.find_all(exp.Table):
-        if table.db:
-            table.set("db", table.db.lower())
-
     return expression
 
 
