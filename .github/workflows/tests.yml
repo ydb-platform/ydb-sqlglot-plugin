@@ -53,16 +53,35 @@ jobs:
       - name: Wait for YDB to be ready
         run: |
           python - <<'EOF'
-          import socket, time, sys
-          for i in range(30):
+          import time, sys
+          import ydb
+          for i in range(60):
+              driver = None
               try:
-                  s = socket.create_connection(("localhost", 2136), timeout=1)
-                  s.close()
-                  print(f"YDB ready after {i+1}s")
+                  driver = ydb.Driver(
+                      endpoint="grpc://localhost:2136",
+                      database="/local",
+                      credentials=ydb.AnonymousCredentials(),
+                  )
+                  driver.wait(timeout=3, fail_fast=True)
+                  with ydb.QuerySessionPool(driver) as pool:
+                      pool.execute_with_retries(
+                          "CREATE TABLE IF NOT EXISTS `_ready_check` "
+                          "(id Int64 NOT NULL, PRIMARY KEY (id))"
+                      )
+                      pool.execute_with_retries("DROP TABLE IF EXISTS `_ready_check`")
+                  print(f"YDB ready after {(i+1)*2}s")
                   sys.exit(0)
-              except OSError:
-                  time.sleep(1)
-          print("YDB did not become ready in time")
+              except Exception as e:
+                  print(f"attempt {i+1}/60: {e}")
+                  time.sleep(2)
+              finally:
+                  if driver:
+                      try:
+                          driver.stop()
+                      except Exception:
+                          pass
+          print("YDB not ready after 120s")
           sys.exit(1)
           EOF
 
@@ -96,16 +115,35 @@ jobs:
       - name: Wait for YDB to be ready
         run: |
           python - <<'EOF'
-          import socket, time, sys
-          for i in range(30):
+          import time, sys
+          import ydb
+          for i in range(60):
+              driver = None
               try:
-                  s = socket.create_connection(("localhost", 2136), timeout=1)
-                  s.close()
-                  print(f"YDB ready after {i+1}s")
+                  driver = ydb.Driver(
+                      endpoint="grpc://localhost:2136",
+                      database="/local",
+                      credentials=ydb.AnonymousCredentials(),
+                  )
+                  driver.wait(timeout=3, fail_fast=True)
+                  with ydb.QuerySessionPool(driver) as pool:
+                      pool.execute_with_retries(
+                          "CREATE TABLE IF NOT EXISTS `_ready_check` "
+                          "(id Int64 NOT NULL, PRIMARY KEY (id))"
+                      )
+                      pool.execute_with_retries("DROP TABLE IF EXISTS `_ready_check`")
+                  print(f"YDB ready after {(i+1)*2}s")
                   sys.exit(0)
-              except OSError:
-                  time.sleep(1)
-          print("YDB did not become ready in time")
+              except Exception as e:
+                  print(f"attempt {i+1}/60: {e}")
+                  time.sleep(2)
+              finally:
+                  if driver:
+                      try:
+                          driver.stop()
+                      except Exception:
+                          pass
+          print("YDB not ready after 120s")
           sys.exit(1)
           EOF
 

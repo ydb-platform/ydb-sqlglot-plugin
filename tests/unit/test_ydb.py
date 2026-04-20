@@ -29,6 +29,10 @@ class Validator(unittest.TestCase):
         )
         return expression
 
+    def validate_transpile(self, sql, expected, read=None):
+        result = parse_one(sql, read=read or self.dialect).sql(dialect=self.dialect)
+        self.assertEqual(expected, result)
+
     def validate_all(self, sql, read=None, write=None, pretty=False):
         expression = self.parse_one(sql)
 
@@ -498,6 +502,234 @@ class TestYDBTransforms(Validator):
         sql = "UPDATE `user` AS u SET active = 0 WHERE NOT EXISTS (SELECT 1 FROM log AS l WHERE l.user_id = u.id)"
         with self.assertRaises(UnsupportedError):
             parse_one(sql, dialect="sqlite").sql(dialect="ydb")
+
+
+# ---------------------------------------------------------------------------
+# YDB parser: new syntax features parsed and round-tripped
+# ---------------------------------------------------------------------------
+
+class TestYDBParser(Validator):
+    """Identity tests for YDB-specific parser additions."""
+
+    dialect = "ydb"
+    maxDiff = None
+
+    # --- $varname -----------------------------------------------------------
+
+    def test_dollar_variable_in_expr(self):
+        self.validate_identity("$x + 1")
+
+    def test_dollar_variable_as_table(self):
+        self.validate_identity("SELECT * FROM $t AS t")
+
+    def test_dollar_variable_in_select(self):
+        self.validate_identity("SELECT $limit FROM `table`")
+
+    # --- Module::Function() -------------------------------------------------
+
+    def test_module_function_simple(self):
+        self.validate_identity("DateTime::GetYear(ts)")
+
+    def test_module_function_nested(self):
+        self.validate_identity(
+            "DateTime::ShiftMonths(DateTime::StartOfMonth(ts), 1)"
+        )
+
+    def test_module_function_in_select(self):
+        self.validate_identity(
+            "SELECT DateTime::GetYear(ts) FROM `events`"
+        )
+
+    def test_module_function_math(self):
+        self.validate_identity("Math::Round(x, -2)")
+
+    # --- DECLARE $p AS Type -------------------------------------------------
+
+    def test_declare_utf8(self):
+        self.validate_identity("DECLARE $name AS Utf8")
+
+    def test_declare_timestamp(self):
+        self.validate_identity("DECLARE $ts AS Timestamp")
+
+    def test_declare_uint64(self):
+        self.validate_identity("DECLARE $id AS Uint64")
+
+    # --- FLATTEN [LIST|DICT] BY ---------------------------------------------
+
+    def test_flatten_by(self):
+        self.validate_identity("SELECT * FROM `t` FLATTEN BY col")
+
+    def test_flatten_list_by(self):
+        self.validate_identity("SELECT * FROM `t` FLATTEN LIST BY col")
+
+    def test_flatten_dict_by(self):
+        self.validate_identity("SELECT * FROM `t` FLATTEN DICT BY col")
+
+    def test_flatten_by_dollar_table(self):
+        self.validate_identity("SELECT k, v FROM $t FLATTEN BY vals")
+
+    # --- T? optional types --------------------------------------------------
+
+    def test_optional_type_utf8(self):
+        self.validate_identity("CAST(x AS Optional<Utf8>)")
+
+    def test_optional_type_utf8_shorthand(self):
+        self.validate_transpile("CAST(x AS Utf8?)", "CAST(x AS Optional<Utf8>)")
+
+    def test_optional_type_timestamp(self):
+        self.validate_identity("CAST(x AS Optional<Timestamp>)")
+
+    def test_optional_type_uint64(self):
+        self.validate_identity("CAST(x AS Optional<Uint64>)")
+
+    def test_non_optional_unchanged(self):
+        self.validate_identity("CAST(x AS Utf8)")
+
+    # --- Container types ----------------------------------------------------
+
+    def test_list(self):
+        self.validate_identity("CAST(x AS List<Int32>)")
+
+    def test_dict(self):
+        self.validate_identity("CAST(x AS Dict<Utf8, Int64>)")
+
+    def test_set(self):
+        self.validate_identity("CAST(x AS Set<Utf8>)")
+
+    def test_tuple(self):
+        self.validate_identity("CAST(x AS Tuple<Int32, Utf8>)")
+
+    def test_optional_list(self):
+        self.validate_identity("CAST(x AS Optional<List<Int32>>)")
+
+    def test_list_optional_element(self):
+        self.validate_identity("CAST(x AS List<Optional<Utf8>>)")
+
+    def test_nested_containers(self):
+        self.validate_identity("CAST(x AS List<Dict<Utf8, Int64>>)")
+
+    def test_optional_tuple(self):
+        self.validate_identity("CAST(x AS Optional<Tuple<Int32, Utf8>>)")
+
+    # --- ASSUME ORDER BY ----------------------------------------------------
+
+    def test_assume_order_by(self):
+        self.validate_identity("SELECT * FROM `t` ASSUME ORDER BY id")
+
+    def test_assume_order_by_desc(self):
+        self.validate_identity("SELECT * FROM `t` ASSUME ORDER BY id DESC")
+
+    def test_assume_order_by_multi_col(self):
+        self.validate_identity("SELECT * FROM `t` ASSUME ORDER BY id, name")
+
+    def test_regular_order_by_unchanged(self):
+        self.validate_identity("SELECT * FROM `t` ORDER BY id")
+
+    # --- Named expressions $name = expr -------------------------------------
+
+    def test_named_expression_subquery(self):
+        self.validate_identity("$t = (SELECT 1)")
+
+    def test_named_expression_from_table(self):
+        self.validate_identity("$t = (SELECT * FROM `table`)")
+
+
+# ---------------------------------------------------------------------------
+# YDB → other dialects
+# ---------------------------------------------------------------------------
+
+class TestYDBToOther(unittest.TestCase):
+    """Tests for YDB parsing → other dialect generation."""
+
+    maxDiff = None
+
+    def ydb_to(self, sql, dialect):
+        return parse_one(sql, dialect="ydb").sql(dialect=dialect)
+
+    # --- CTEs ($var = SELECT) → WITH ----------------------------------------
+
+    def test_cte_to_postgres(self):
+        self.assertEqual(
+            "WITH t AS (SELECT 1 AS x) SELECT * FROM t AS t",
+            self.ydb_to("$t = (SELECT 1 AS x); SELECT * FROM $t AS t", "postgres"),
+        )
+
+    def test_multi_cte_to_postgres(self):
+        self.assertEqual(
+            "WITH a AS (SELECT 1), b AS (SELECT x FROM a AS a) SELECT * FROM b AS b",
+            self.ydb_to("$a = (SELECT 1); $b = (SELECT x FROM $a AS a); SELECT * FROM $b AS b", "postgres"),
+        )
+
+    def test_cte_to_clickhouse(self):
+        self.assertEqual(
+            "WITH t AS (SELECT 1 AS x) SELECT * FROM t AS t",
+            self.ydb_to("$t = (SELECT 1 AS x); SELECT * FROM $t AS t", "clickhouse"),
+        )
+
+    # --- Integer type mappings -----------------------------------------------
+
+    def test_int32_to_postgres(self):
+        self.assertEqual(
+            "CAST(x AS INT)",
+            self.ydb_to("CAST(x AS Int32)", "postgres"),
+        )
+
+    def test_int64_to_postgres(self):
+        self.assertEqual(
+            "CAST(x AS BIGINT)",
+            self.ydb_to("CAST(x AS Int64)", "postgres"),
+        )
+
+    def test_int32_to_clickhouse(self):
+        self.assertEqual(
+            "CAST(x AS Nullable(Int32))",
+            self.ydb_to("CAST(x AS Int32)", "clickhouse"),
+        )
+
+    # --- Optional<T> → nullable type ----------------------------------------
+
+    def test_optional_to_postgres(self):
+        # Optional wrapper is dropped; Utf8 maps to TEXT
+        self.assertEqual(
+            "CAST(x AS TEXT)",
+            self.ydb_to("CAST(x AS Optional<Utf8>)", "postgres"),
+        )
+
+    def test_optional_int_to_postgres(self):
+        self.assertEqual(
+            "CAST(x AS INT)",
+            self.ydb_to("CAST(x AS Optional<Int32>)", "postgres"),
+        )
+
+    def test_optional_to_clickhouse(self):
+        # ClickHouse wraps in Nullable(); Utf8 maps to String (ClickHouse text type)
+        self.assertEqual(
+            "CAST(x AS Nullable(String))",
+            self.ydb_to("CAST(x AS Optional<Utf8>)", "clickhouse"),
+        )
+
+    # --- Container types -----------------------------------------------------
+
+    def test_tuple_to_clickhouse(self):
+        self.assertEqual(
+            "CAST(x AS Tuple(_0 Nullable(Int32), _1 Nullable(String)))",
+            self.ydb_to("CAST(x AS Tuple<Int32, Utf8>)", "clickhouse"),
+        )
+
+    def test_dict_to_clickhouse(self):
+        self.assertEqual(
+            "CAST(x AS Map(String, Nullable(Int64)))",
+            self.ydb_to("CAST(x AS Dict<Utf8, Int64>)", "clickhouse"),
+        )
+
+    # --- Module functions survive transpilation ------------------------------
+
+    def test_module_func_preserved_in_clickhouse(self):
+        # ClickHouse preserves :: function calls as-is (different identifier quoting)
+        self.assertEqual(
+            'SELECT DateTime::GetYear(ts) FROM "t"',
+            self.ydb_to("SELECT DateTime::GetYear(ts) FROM `t`", "clickhouse"),
+        )
 
 
 # ---------------------------------------------------------------------------

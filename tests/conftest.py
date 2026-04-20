@@ -34,20 +34,5 @@ def ydb_pool():
     )
     driver.wait(timeout=10, fail_fast=True)
     with ydb.QuerySessionPool(driver) as pool:
-        # YDB accepts TCP connections before the schema service is fully ready.
-        # Creating a throw-away table is a reliable sign that DDL is available.
-        import time
-        for attempt in range(30):
-            try:
-                pool.execute_with_retries(
-                    "CREATE TABLE IF NOT EXISTS `_ready_check` "
-                    "(id Int64 NOT NULL, PRIMARY KEY (id))"
-                )
-                pool.execute_with_retries("DROP TABLE IF EXISTS `_ready_check`")
-                break
-            except Exception:
-                if attempt == 29:
-                    pytest.skip("YDB not ready after 30 s — DDL still unavailable")
-                time.sleep(1)
         yield pool
     driver.stop()
