@@ -1,3 +1,4 @@
+import re
 import typing as t
 
 from sqlglot import exp, tokens, generator, transforms, TokenType, parser, Generator
@@ -92,6 +93,258 @@ def _replace(expression, condition):
     return expression.replace(exp.condition(condition))
 
 
+_DATE_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_agg_alias_seq = iter(range(10_000))
+
+
+def _alias_order_by_aggregates(expression: exp.Expression) -> None:
+    """
+    YDB does not allow ORDER BY on an aggregate expression directly
+    (e.g. ORDER BY COUNT(*) DESC). Fix: for every SELECT that has an
+    unaliased aggregate in ORDER BY which also appears in the SELECT
+    list, give that aggregate an auto-generated alias and replace the
+    ORDER BY reference with it. Mutates in-place.
+    """
+    for select in list(expression.find_all(exp.Select)):
+        order = select.args.get("order")
+        if not order:
+            continue
+        for ordered in order.expressions:
+            ob_expr = ordered.this
+            if not isinstance(ob_expr, exp.AggFunc):
+                continue
+            ob_sql = ob_expr.sql()
+            # find matching SELECT expression
+            for sel_expr in select.expressions:
+                candidate = sel_expr.this if isinstance(sel_expr, exp.Alias) else sel_expr
+                if candidate.sql() == ob_sql:
+                    if isinstance(sel_expr, exp.Alias):
+                        alias_name = sel_expr.alias
+                    else:
+                        alias_name = f"_agg_{next(_agg_alias_seq)}"
+                        new_alias = exp.Alias(this=sel_expr.copy(), alias=exp.to_identifier(alias_name))
+                        sel_expr.replace(new_alias)
+                    ordered.set("this", exp.column(alias_name))
+                    break
+
+
+def _expand_positional_group_by(expression: exp.Expression) -> None:
+    """
+    YDB rejects GROUP BY with integer literals (positional references).
+    Replace each integer literal in GROUP BY with the corresponding SELECT
+    expression. Mutates in-place.
+    """
+    for select in list(expression.find_all(exp.Select)):
+        group = select.args.get("group")
+        if not group:
+            continue
+        sel_exprs = select.expressions
+        new_group_exprs = []
+        changed = False
+        for g in group.expressions:
+            if isinstance(g, exp.Literal) and not g.is_string:
+                idx = int(g.this) - 1  # 1-based → 0-based
+                if 0 <= idx < len(sel_exprs):
+                    sel = sel_exprs[idx]
+                    expanded = sel.this.copy() if isinstance(sel, exp.Alias) else sel.copy()
+                    # Skip constant/literal expressions — they don't affect grouping
+                    if isinstance(expanded, exp.Literal):
+                        changed = True
+                        continue
+                    new_group_exprs.append(expanded)
+                    changed = True
+                    continue
+            new_group_exprs.append(g)
+        if changed:
+            group.set("expressions", new_group_exprs)
+
+
+_subq_alias_seq = iter(range(10_000))
+
+
+def _wrap_udf_group_by(expression: exp.Expression) -> None:
+    """
+    YDB does not allow GROUP BY expressions that reference columns not directly
+    listed in GROUP BY.  E.g. GROUP BY DateTime::GetMinute(EventTime) fails
+    because EventTime itself is not in GROUP BY.
+
+    Fix: when a GROUP BY contains a non-trivial expression (function call, CASE, …)
+    — either directly or via a SELECT alias reference — wrap the whole SELECT in a
+    subquery that materialises those expressions as aliases, then GROUP BY the plain
+    aliases in the outer query.
+
+    Mutates the tree in-place (replaces the Select node).
+    """
+    def _is_trivial(e: exp.Expression) -> bool:
+        return isinstance(e, (exp.Column, exp.Identifier))
+
+    for select in list(expression.find_all(exp.Select)):
+        group = select.args.get("group")
+        if not group:
+            continue
+
+        # Build alias → underlying_expression map from the SELECT clause.
+        alias_to_expr: dict[str, exp.Expression] = {}
+        for sel in select.expressions:
+            if isinstance(sel, exp.Alias):
+                alias_to_expr[sel.alias] = sel.this
+
+        # Resolve each GROUP BY expression to its "effective" form
+        # (expand alias references to the aliased expression).
+        def _effective(e: exp.Expression) -> exp.Expression:
+            if isinstance(e, exp.Column):
+                name = e.name
+                if name in alias_to_expr:
+                    return alias_to_expr[name]
+            return e
+
+        # Check: does any effective GROUP BY expression need the subquery treatment?
+        has_complex = any(not _is_trivial(_effective(g)) for g in group.expressions)
+        if not has_complex:
+            continue
+
+        # Resolve GROUP BY: replace alias-references with their underlying expressions.
+        resolved_group: list[exp.Expression] = [_effective(g) for g in group.expressions]
+
+        # For each non-trivial resolved GROUP BY expression, find or assign an alias.
+        gb_alias: dict[str, str] = {}  # effective_expr.sql() → alias_name
+        new_sel_exprs = list(select.expressions)
+
+        for eff in resolved_group:
+            if _is_trivial(eff):
+                continue
+            eff_sql = eff.sql()
+            # Find an existing SELECT alias for this expression.
+            found = next(
+                (sel.alias for sel in select.expressions
+                 if isinstance(sel, exp.Alias) and sel.this.sql() == eff_sql),
+                None,
+            )
+            if found:
+                gb_alias[eff_sql] = found
+            else:
+                new_name = f"_gb_{next(_subq_alias_seq)}"
+                gb_alias[eff_sql] = new_name
+                new_sel_exprs.append(
+                    exp.Alias(this=eff.copy(), alias=exp.to_identifier(new_name))
+                )
+
+        # Collect raw column references used inside aggregate functions in the outer SELECT.
+        # These columns must also be available in the subquery for the outer aggregates.
+        agg_cols: set[str] = set()
+        for sel in new_sel_exprs:
+            agg_search = sel.this if isinstance(sel, exp.Alias) else sel
+            if isinstance(agg_search, exp.AggFunc):
+                for col in agg_search.find_all(exp.Column):
+                    col_name = col.name
+                    if col_name not in alias_to_expr:  # not a SELECT alias
+                        agg_cols.add(col_name)
+
+        # Build the inner subquery SELECT (no aggregates, no GROUP BY / HAVING).
+        inner_sel_exprs = []
+        seen_inner_names: set[str] = set()
+        for sel in new_sel_exprs:
+            inner_expr = sel.this if isinstance(sel, exp.Alias) else sel
+            if isinstance(inner_expr, exp.AggFunc):
+                continue  # aggregates belong in the outer query
+            inner_sel_exprs.append(sel.copy())
+            alias_nm = sel.alias if isinstance(sel, exp.Alias) else sel.name
+            seen_inner_names.add(alias_nm)
+
+        # Add raw column refs needed by outer aggregates if not already in inner SELECT.
+        for col_name in sorted(agg_cols):
+            if col_name not in seen_inner_names:
+                inner_sel_exprs.append(exp.column(col_name))
+                seen_inner_names.add(col_name)
+
+        inner_select = exp.Select(
+            expressions=inner_sel_exprs,
+            **{
+                k: v.copy() if v is not None else None
+                for k, v in select.args.items()
+                if k not in ("expressions", "group", "having", "order",
+                             "limit", "offset", "distinct", "operation_modifiers")
+            }
+        )
+        subq_alias = f"_subq_{next(_subq_alias_seq)}"
+        subquery = exp.Subquery(
+            this=inner_select,
+            alias=exp.TableAlias(this=exp.to_identifier(subq_alias)),
+        )
+
+        # Outer GROUP BY: use alias name whenever the original GB item referenced a
+        # SELECT alias (trivial or not); otherwise keep the resolved expression.
+        new_group_exprs = []
+        for g, eff in zip(group.expressions, resolved_group):
+            if isinstance(g, exp.Column) and g.name in alias_to_expr:
+                # GB item was an alias reference → use the alias name in the outer query
+                new_group_exprs.append(exp.column(g.name))
+            elif _is_trivial(eff):
+                new_group_exprs.append(eff.copy())
+            else:
+                new_group_exprs.append(exp.column(gb_alias[eff.sql()]))
+
+        # Outer SELECT expressions: replace non-trivial expressions with alias columns,
+        # keep aggregates as-is.
+        orig_alias_names = {sel.alias for sel in select.expressions if isinstance(sel, exp.Alias)}
+
+        def _outer_sel(sel: exp.Expression) -> t.Optional[exp.Expression]:
+            if isinstance(sel, exp.Alias):
+                # Synthesised GB alias not in original SELECT → skip
+                if sel.alias.startswith("_gb_") and sel.alias not in orig_alias_names:
+                    return None
+                inner = sel.this
+                if isinstance(inner, exp.AggFunc):
+                    return sel.copy()
+                return exp.column(sel.alias)
+            return sel.copy()
+
+        outer_sel_exprs = [r for sel in new_sel_exprs if (r := _outer_sel(sel)) is not None]
+
+        # Reconstruct the outer SELECT (keep HAVING, ORDER BY, LIMIT, etc.).
+        outer_kwargs = {
+            k: v.copy() if v is not None else None
+            for k, v in select.args.items()
+            if k not in ("expressions", "from_", "joins", "where", "group",
+                         "prewhere", "laterals", "pivots", "match", "connect", "start")
+        }
+        outer_kwargs["expressions"] = outer_sel_exprs
+        outer_kwargs["from_"] = exp.From(this=subquery)
+        outer_kwargs["group"] = exp.Group(expressions=new_group_exprs)
+
+        outer_select = exp.Select(**outer_kwargs)
+        if select.parent is None:
+            # Root node — replace() won't work; mutate args in-place.
+            select.args.clear()
+            select.args.update(outer_select.args)
+        else:
+            select.replace(outer_select)
+
+
+def _cast_date_string_literals(expression: exp.Expression) -> None:
+    """
+    Wrap ISO date string literals (YYYY-MM-DD) in CAST(... AS DATE) when they
+    appear in comparison contexts. YDB requires explicit typing; it does not
+    coerce bare strings to DATE automatically.
+    Mutates the expression in-place.
+    """
+    for node in list(expression.find_all(exp.GTE, exp.LTE, exp.GT, exp.LT, exp.EQ, exp.NEQ)):
+        for side in ("this", "expression"):
+            child = node.args.get(side)
+            if (
+                isinstance(child, exp.Literal)
+                and child.is_string
+                and _DATE_LITERAL_RE.match(child.this)
+            ):
+                node.set(
+                    side,
+                    exp.Cast(
+                        this=child.copy(),
+                        to=exp.DataType(this=exp.DataType.Type.DATE, nested=False),
+                    ),
+                )
+
+
 def _other_operand(expression):
     """
     Returns the other operand of a binary operation involving a subquery
@@ -118,6 +371,75 @@ def _other_operand(expression):
     return None
 
 
+def _simplify_double_not(expression: exp.Expression) -> None:
+    """Simplify NOT NOT x → x in-place.
+
+    YDB does not accept ``NOT NOT (expr)`` syntax.  This pattern can appear
+    after subquery unnesting when an EXISTS predicate is wrapped in a NOT IN
+    context, producing a double negation like ``NOT NOT (_u_1.key IS NULL)``.
+    We remove both NOTs to restore the original semantics.
+    """
+    for node in list(expression.walk()):
+        if isinstance(node, exp.Not) and isinstance(node.this, exp.Not):
+            node.replace(node.this.this.copy())
+
+
+def _apply_subquery_alias_columns(expression: exp.Expression) -> None:
+    """Apply subquery alias column names to the SELECT columns in-place.
+
+    SQL allows: ``(SELECT a, b FROM ...) AS t (x, y)`` — aliases ``x`` and ``y``
+    rename the SELECT's output columns.  YDB does not support this column-list
+    syntax on subquery aliases (``SUPPORTS_TABLE_ALIAS_COLUMNS = False``), so we
+    inline the aliases directly on the SELECT expressions before generation.
+    """
+    for subquery in list(expression.find_all(exp.Subquery)):
+        alias = subquery.args.get("alias")
+        if not isinstance(alias, exp.TableAlias):
+            continue
+        col_list = alias.columns
+        if not col_list:
+            continue
+        inner = subquery.this
+        if not isinstance(inner, exp.Select):
+            continue
+        if len(col_list) != len(inner.expressions):
+            continue
+        new_exprs = []
+        for sel_expr, col_id in zip(inner.expressions, col_list):
+            alias_name = col_id.name if hasattr(col_id, "name") else str(col_id)
+            if not alias_name:
+                new_exprs.append(sel_expr)
+                continue
+            if isinstance(sel_expr, exp.Alias):
+                new_sel = sel_expr.copy()
+                new_sel.set("alias", exp.to_identifier(alias_name))
+            else:
+                new_sel = exp.alias_(sel_expr.copy(), alias_name)
+            new_exprs.append(new_sel)
+        inner.set("expressions", new_exprs)
+        alias.set("columns", [])
+
+
+def _has_implicit_cross_join(expression: exp.Expression) -> bool:
+    """Return True if the expression tree contains an implicit cross join.
+
+    An implicit cross join arises from comma-separated FROM tables, e.g.
+    ``FROM t1, t2``.  In the sqlglot AST this appears as a ``Join`` node
+    with no ``kind``, no ``on`` clause, and no ``using`` clause.
+    YDB disables implicit cross joins by default; callers can prepend
+    ``PRAGMA AnsiImplicitCrossJoin;`` when this returns True.
+    """
+    for node in expression.walk():
+        if isinstance(node, exp.Join):
+            if (
+                not node.args.get("kind")
+                and not node.args.get("on")
+                and not node.args.get("using")
+            ):
+                return True
+    return False
+
+
 class YDB(Dialect):
     """
     YDB SQL dialect implementation for sqlglot.
@@ -139,6 +461,8 @@ class YDB(Dialect):
     # YDB handles safe division via NULLIF in the source dialect already;
     # setting this prevents div_sql from wrapping the denominator a second time.
     SAFE_DIVISION = True
+    # YDB does not support NULLS FIRST / NULLS LAST; prevent the generator from emitting them.
+    NULL_ORDERING = None
 
     class Tokenizer(tokens.Tokenizer):
         """
@@ -251,7 +575,7 @@ class YDB(Dialect):
         VARCHAR_REQUIRES_SIZE = False
         CAN_IMPLEMENT_ARRAY_ANY = True
         STRUCT_DELIMITER = ("<|", "|>")
-        NULL_ORDERING_SUPPORTED: t.Optional[bool] = True
+        NULL_ORDERING_SUPPORTED: t.Optional[bool] = False
         NULL_ORDERING = None
         MATCHED_BY_SOURCE = False
 
@@ -575,7 +899,28 @@ class YDB(Dialect):
                 output = ""
 
                 for cte in all_ctes:
-                    cte_sql = self.sql(cte.this)
+                    cte_body = cte.this.copy()
+                    # Apply CTE column aliases (WITH name (col1, col2) AS (...)) to the
+                    # SELECT expressions, because YDB's $var = (...) form doesn't support
+                    # a column list and outer queries reference the aliased names.
+                    cte_alias = cte.args.get("alias")
+                    if isinstance(cte_alias, exp.TableAlias):
+                        col_list = cte_alias.columns
+                        if col_list and len(col_list) == len(cte_body.expressions):
+                            new_exprs = []
+                            for sel_expr, col_id in zip(cte_body.expressions, col_list):
+                                alias_name = col_id.name if hasattr(col_id, "name") else str(col_id)
+                                if not alias_name:
+                                    new_exprs.append(sel_expr)
+                                    continue
+                                if isinstance(sel_expr, exp.Alias):
+                                    new_sel = sel_expr.copy()
+                                    new_sel.set("alias", exp.to_identifier(alias_name))
+                                else:
+                                    new_sel = exp.alias_(sel_expr.copy(), alias_name)
+                                new_exprs.append(new_sel)
+                            cte_body.set("expressions", new_exprs)
+                    cte_sql = self.sql(cte_body)
                     output += f"${cte.alias_or_name} = ({cte_sql});\n\n"
 
                 body_sql = self.sql(expression)
@@ -601,6 +946,23 @@ class YDB(Dialect):
             Returns:
                 SQL string for creating a table in YDB
             """
+            # YDB has no CREATE OR REPLACE TABLE syntax — strip the OR REPLACE qualifier.
+            # The caller is responsible for deciding whether to drop the table first.
+            if expression.args.get("replace"):
+                expression.set("replace", False)
+
+            # Strip dialect-specific properties YDB doesn't understand (ENGINE, SETTINGS, …)
+            props = expression.args.get("properties")
+            if props:
+                keep = [
+                    p for p in props.expressions
+                    if not isinstance(p, (exp.EngineProperty, exp.SettingsProperty))
+                ]
+                if keep:
+                    props.set("expressions", keep)
+                else:
+                    expression.set("properties", None)
+
             # Clean up index parts from table
             for ex in list(expression.this.expressions):
                 if isinstance(ex, exp.Identifier):
@@ -692,13 +1054,12 @@ class YDB(Dialect):
             self.unnest_subqueries(expression)
             expression = eliminate_join_marks(expression)
             expression = expression.copy() if copy else expression
-
-            # Without pragmas, some queries may not work - for example, implicit cross joins are disabled by default.
-            # pragma_statements = []
-            #
-            # if isinstance(expression, (exp.Select, exp.Insert, exp.Update, exp.Delete, exp.Create)):
-            #     pragma_statements = ['PRAGMA AnsiImplicitCrossJoin;',
-            #                          'PRAGMA AnsiInForEmptyOrNullableItemsCollections;']
+            _simplify_double_not(expression)
+            _apply_subquery_alias_columns(expression)
+            _cast_date_string_literals(expression)
+            _alias_order_by_aggregates(expression)
+            _expand_positional_group_by(expression)
+            _wrap_udf_group_by(expression)
 
             if not isinstance(expression, exp.Create) or (
                     isinstance(expression, exp.Create)
@@ -709,9 +1070,12 @@ class YDB(Dialect):
             else:
                 sql = self._generate_create_table(expression)
 
-            # can be uncommented to support comparisons of optional types with non-optional
-            # wrap_lambda = '$wrap_non_optional_in_comparisons = ($column) -> {RETURN IF(FormatType(TypeOf($column)) LIKE "Optional<%", $column, Just($column))};\n\n'
-            # return "\n".join(pragma_statements) + "\n" + wrap_lambda + sql
+            # Prepend PRAGMA AnsiImplicitCrossJoin only when the query contains
+            # implicit cross joins (FROM t1, t2 syntax).  YDB disables them by
+            # default; the pragma restores standard SQL semantics.
+            if _has_implicit_cross_join(expression):
+                sql = "PRAGMA AnsiImplicitCrossJoin;\n" + sql
+
             return sql
 
         def unnest_subqueries(self, expression):
@@ -892,6 +1256,14 @@ class YDB(Dialect):
                 return
 
             if select.find(exp.Limit, exp.Offset):
+                return
+
+            # YDB supports NOT IN (SELECT ...) natively for non-correlated subqueries.
+            # Unnesting NOT IN produces an unqualified column in the JOIN ON clause which
+            # YDB rejects with "JOIN: column requires correlation name".  Since unnest()
+            # is only called for non-correlated subqueries (correlated ones go through
+            # decorrelate()), we can safely pass NOT IN through to YDB unchanged.
+            if isinstance(predicate, exp.In) and isinstance(predicate.parent, exp.Not):
                 return
 
             if isinstance(predicate, exp.Any):
@@ -1278,17 +1650,31 @@ class YDB(Dialect):
             expr = self.sql(expression, "this")
             unit = expression.text("unit").upper()
 
-            if unit == "WEEK":
-                return f"DateTime::MakeDate(DateTime::StartOfWeek({expr}))"
-            elif unit == "MONTH":
-                return f"DateTime::MakeDate(DateTime::StartOfMonth({expr}))"
+            if unit == "YEAR":
+                return f"DateTime::MakeDate(DateTime::StartOfYear({expr}))"
             elif unit == "QUARTER":
                 return f"DateTime::MakeDate(DateTime::StartOfQuarter({expr}))"
-            elif unit == "YEAR":
-                return f"DateTime::MakeDate(DateTime::StartOfYear({expr}))"
+            elif unit == "MONTH":
+                return f"DateTime::MakeDate(DateTime::StartOfMonth({expr}))"
+            elif unit == "WEEK":
+                return f"DateTime::MakeDate(DateTime::StartOfWeek({expr}))"
+            elif unit == "DAY":
+                return self.func("DATE", expr)
+            elif unit == "HOUR":
+                # Truncate to hour: subtract the minute and second components
+                return (
+                    f"({expr}"
+                    f" - DateTime::IntervalFromMinutes(CAST(DateTime::GetMinute({expr}) AS Int32))"
+                    f" - DateTime::IntervalFromSeconds(CAST(DateTime::GetSecond({expr}) AS Int32)))"
+                )
+            elif unit == "MINUTE":
+                # Truncate to minute: subtract the second component
+                return (
+                    f"({expr}"
+                    f" - DateTime::IntervalFromSeconds(CAST(DateTime::GetSecond({expr}) AS Int32)))"
+                )
             else:
-                if unit != "DAY":
-                    self.unsupported(f"Unexpected interval unit: {unit}")
+                self.unsupported(f"Unexpected DATE_TRUNC unit: {unit}")
                 return self.func("DATE", expr)
 
         def _current_timestamp_sql(self, expression: exp.CurrentTimestamp) -> str:
@@ -1332,16 +1718,19 @@ class YDB(Dialect):
             unit = expression.name.upper()
             expr = self.sql(expression.expression)
 
-            if unit == "WEEK":
-                return f"DateTime::GetWeekOfYear({expr})"
-            elif unit == "MONTH":
-                return f"DateTime::GetMonth({expr})"
-            elif unit == "YEAR":
-                return f"DateTime::GetYear({expr})"
-            else:
-                if unit != "DAY":
-                    self.unsupported(f"Unexpected interval unit: {unit}")
-                return self.func("DATE", expr)
+            _EXTRACT_MAP = {
+                "YEAR": "DateTime::GetYear",
+                "MONTH": "DateTime::GetMonth",
+                "WEEK": "DateTime::GetWeekOfYear",
+                "DAY": "DateTime::GetDayOfMonth",
+                "HOUR": "DateTime::GetHour",
+                "MINUTE": "DateTime::GetMinute",
+                "SECOND": "DateTime::GetSecond",
+            }
+            if unit in _EXTRACT_MAP:
+                return f"{_EXTRACT_MAP[unit]}({expr})"
+            self.unsupported(f"Unexpected EXTRACT unit: {unit}")
+            return self.func("DATE", expr)
 
         def _lambda(self, expression: exp.Lambda, arrow_sep: str = "->") -> str:
             """
@@ -1489,8 +1878,21 @@ class YDB(Dialect):
                 return super().join_sql(expression)
 
             if on_condition:
+                # For OUTER JOINs (LEFT / RIGHT / FULL), keep the entire ON clause intact.
+                # Moving non-equality conditions from ON to WHERE changes the semantics:
+                # in a LEFT JOIN, a non-equality filter in ON still produces a row for the
+                # left-side record (with NULLs on the right), whereas the same filter in
+                # WHERE would eliminate that row.  Pass outer-join ON clauses through
+                # unchanged; YDB accepts non-equality predicates in OUTER JOIN ON.
+                join_is_outer = any(
+                    k in (expression.side or "").upper()
+                    for k in ["LEFT", "RIGHT", "FULL"]
+                )
+                if join_is_outer:
+                    return super().join_sql(expression)
+
                 # Extract all non-equality conditions (including those with literals)
-                # YDB only allows equality predicates in JOIN ON
+                # YDB only allows equality predicates in INNER/CROSS JOIN ON
                 literal_conditions: list[Expression] = []
                 non_equality_conditions: list[Expression] = []
                 equality_conditions: list[Expression] = []
@@ -1506,14 +1908,16 @@ class YDB(Dialect):
                         # Check if it's a true equi-join (columns from different tables)
                         left = cond.this
                         right = cond.expression
+                        left_table = getattr(left, "table", None) if isinstance(left, exp.Column) else None
+                        right_table = getattr(right, "table", None) if isinstance(right, exp.Column) else None
                         if (
                                 isinstance(left, exp.Column)
                                 and isinstance(right, exp.Column)
-                                and hasattr(left, "table")
-                                and hasattr(right, "table")
-                                and left.table
-                                and right.table
-                                and left.table != right.table
+                                # At least one side must be table-qualified and they must differ
+                                # (this covers cases where one side has no qualifier, e.g.
+                                #  ps_suppkey = _u_1.s_suppkey from NOT IN unnesting)
+                                and (left_table or right_table)
+                                and left_table != right_table
                         ):
                             equality_conditions.append(cond)
                         else:
@@ -1599,13 +2003,17 @@ class YDB(Dialect):
         def select_sql(self, expression: exp.Select) -> str:
             # Store the original-to-alias mapping for GROUP BY/ORDER BY reference
             self.expression_to_alias = {}
+            # Reverse mapping: alias name -> original expression (for GROUP BY expansion)
+            self.alias_to_expression: dict[str, exp.Expression] = {}
 
             # Build mapping of original expressions to their aliases
             # After that, in WHERE and ORDER BY use aliases
             for select_expr in expression.expressions:
                 if isinstance(select_expr, exp.Alias):
                     expr_sql = self.sql(select_expr.this).strip()
-                    self.expression_to_alias[expr_sql] = select_expr.alias_or_name
+                    alias_name = select_expr.alias_or_name
+                    self.expression_to_alias[expr_sql] = alias_name
+                    self.alias_to_expression[alias_name] = select_expr.this
                 else:
                     expr_sql = self.sql(select_expr).strip()
                     if isinstance(select_expr, (exp.Column, exp.Identifier)):
@@ -1668,6 +2076,38 @@ class YDB(Dialect):
                     raise ValueError(f"Unsupported interval type: {unit.name}")
 
                 return f"{source} {op} {interval_expr}"
+
+        def add_sql(self, expression: exp.Add) -> str:
+            """
+            Intercept date + INTERVAL n YEAR/MONTH before the default Add handler.
+            YDB has no native YEAR/MONTH interval; use DateTime::ShiftYears/ShiftMonths.
+            """
+            return self._maybe_shift_date(expression, op="+") or super().add_sql(expression)
+
+        def sub_sql(self, expression: exp.Sub) -> str:
+            """
+            Intercept date - INTERVAL n YEAR/MONTH (same as add_sql but subtraction).
+            """
+            return self._maybe_shift_date(expression, op="-") or super().sub_sql(expression)
+
+        def _maybe_shift_date(self, expression: exp.Expression, op: str) -> str:
+            """
+            If expression is (date_expr ± INTERVAL n YEAR/MONTH), rewrite as
+            DateTime::MakeDate(DateTime::ShiftYears/ShiftMonths(date_expr, ±n)).
+            Returns empty string when the pattern does not match.
+            """
+            left = expression.this
+            right = expression.expression if hasattr(expression, "expression") else expression.right
+            if not isinstance(right, exp.Interval):
+                return ""
+            unit = right.text("unit").upper()
+            if unit not in ("YEAR", "YEARS", "MONTH"):
+                return ""
+            value = right.text("this").strip("'")
+            source = self.sql(left)
+            n = f"-{value}" if op == "-" else value
+            fn = "ShiftYears" if unit in ("YEAR", "YEARS") else "ShiftMonths"
+            return f"DateTime::MakeDate(DateTime::{fn}({source}, {n}))"
 
         def interval_sql(self, expression: exp.Interval) -> str:
             """
@@ -1789,23 +2229,42 @@ class YDB(Dialect):
                 group_by_items = ", ".join(self.sql(e) for e in expression.expressions)
                 return f" GROUP BY {group_by_items}" if group_by_items else " GROUP BY"
 
+            # If the SELECT's FROM is a subquery, the alias columns are already materialised
+            # there — do NOT expand alias references in GROUP BY.
+            from_node = select_stmt.args.get("from_")
+            from_is_subquery = (
+                from_node is not None
+                and isinstance(from_node.this, exp.Subquery)
+            )
+
             transformed = []
             for gb_expr in expression.expressions:
                 gb_sql = self.sql(gb_expr).strip()
 
-                # Check if we have a stored mapping for this expression
-                if hasattr(self, "expression_to_alias") and gb_sql in self.expression_to_alias:
-                    alias_name = self.expression_to_alias[gb_sql]
-                    alias_expr = exp.alias_(gb_expr, alias_name)
-                    transformed.append(alias_expr)
+                # If this GROUP BY item is an alias of a complex SELECT expression, expand it
+                # (only when FROM is NOT a subquery — otherwise the alias is a real column;
+                # only expand non-trivial expressions — column aliases are handled below)
+                alias_map = getattr(self, "alias_to_expression", {})
+                if (
+                    not from_is_subquery
+                    and isinstance(gb_expr, exp.Column)
+                    and gb_sql in alias_map
+                    and not isinstance(alias_map[gb_sql], (exp.Column, exp.Identifier))
+                ):
+                    # Expand alias → full expression so YDB doesn't confuse it with a column
+                    transformed.append(alias_map[gb_sql].copy())
+                elif isinstance(gb_expr, (exp.Column, exp.Identifier)):
+                    # Add column AS alias so YDB resolves unambiguously.
+                    # Strip any table qualifier from the column (e.g. y.a → a).
+                    # Use the SELECT-level alias if the column is aliased there
+                    # (e.g. `a_id AS _u_1` in SELECT means GROUP BY `a_id AS _u_1`).
+                    column_name = gb_expr.alias_or_name
+                    expr_to_alias = getattr(self, "expression_to_alias", {})
+                    alias_name = expr_to_alias.get(column_name, column_name)
+                    unqualified_col = exp.column(column_name)
+                    transformed.append(exp.alias_(unqualified_col, alias_name))
                 else:
-                    if isinstance(gb_expr, (exp.Column, exp.Identifier)):
-                        # Use the column name as the alias
-                        column_name = gb_expr.alias_or_name
-                        alias_expr = exp.alias_(gb_expr, column_name)
-                        transformed.append(alias_expr)
-                    else:
-                        transformed.append(gb_expr)
+                    transformed.append(gb_expr)
 
             group_by_items = ", ".join(f"{self.sql(e)}" for e in transformed) if transformed else ""
 
@@ -1829,6 +2288,32 @@ class YDB(Dialect):
                 result += f" {grouping_sets}"
 
             return result
+
+        # YDB uses C-like string escaping: backslash must be doubled in literals.
+        _YDB_ESCAPE_MAP = str.maketrans({
+            "\x07": "\\a", "\x08": "\\b", "\x0c": "\\f",
+            "\n": "\\n", "\r": "\\r", "\t": "\\t", "\x0b": "\\v",
+            "\\": "\\\\",
+        })
+
+        def escape_str(self, text: str, escape_backslash: bool = True, **kwargs) -> str:
+            if escape_backslash:
+                text = text.translate(self._YDB_ESCAPE_MAP)
+            # Escape the single-quote delimiter the normal way ('' or \')
+            return text.replace("'", "''")
+
+        def not_sql(self, expression: exp.Not) -> str:
+            """YDB requires explicit parentheses around LIKE inside NOT."""
+            inner = expression.this
+            if isinstance(inner, (exp.Like, exp.ILike, exp.SimilarTo)):
+                return f"NOT ({self.sql(inner)})"
+            return super().not_sql(expression)
+
+        def ordered_sql(self, expression: exp.Ordered) -> str:
+            """YDB does not support NULLS FIRST / NULLS LAST — strip them."""
+            expression = expression.copy()
+            expression.set("nulls_first", None)
+            return super().ordered_sql(expression)
 
         def _order_sql(self, expression: exp.Order) -> str:
             """Generate ORDER BY using alias references."""
@@ -1922,4 +2407,8 @@ class YDB(Dialect):
             exp.Set: _set_sql,
             exp.Group: _group_by,
             exp.Order: _order_sql,
+            exp.RegexpReplace: lambda self, e: (
+                f"Re2::Replace({self.sql(e, 'expression')})"
+                f"({self.sql(e, 'this')}, {self.sql(e, 'replacement')})"
+            ),
         }

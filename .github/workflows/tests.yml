@@ -28,7 +28,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run unit tests
-        run: pytest tests/test_ydb.py
+        run: pytest tests/unit/
 
   integration:
     name: Integration tests (YDB)
@@ -67,7 +67,50 @@ jobs:
           EOF
 
       - name: Run integration tests
-        run: pytest tests/test_integration.py -v
+        run: pytest tests/integration/ -v
+
+      - name: Stop YDB
+        if: always()
+        run: docker compose down
+
+  benchmarks:
+    name: Benchmark tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Start YDB
+        run: docker compose up -d
+
+      - name: Wait for YDB to be ready
+        run: |
+          python - <<'EOF'
+          import socket, time, sys
+          for i in range(30):
+              try:
+                  s = socket.create_connection(("localhost", 2136), timeout=1)
+                  s.close()
+                  print(f"YDB ready after {i+1}s")
+                  sys.exit(0)
+              except OSError:
+                  time.sleep(1)
+          print("YDB did not become ready in time")
+          sys.exit(1)
+          EOF
+
+      - name: Run benchmark tests
+        run: pytest tests/benchmarks/ -v
 
       - name: Stop YDB
         if: always()
