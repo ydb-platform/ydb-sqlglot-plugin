@@ -403,26 +403,6 @@ def _apply_subquery_alias_columns(expression: exp.Expression) -> None:
         alias.set("columns", [])
 
 
-def _has_implicit_cross_join(expression: exp.Expression) -> bool:
-    """Return True if the expression tree contains an implicit cross join.
-
-    An implicit cross join arises from comma-separated FROM tables, e.g.
-    ``FROM t1, t2``.  In the sqlglot AST this appears as a ``Join`` node
-    with no ``kind``, no ``on`` clause, and no ``using`` clause.
-    YDB disables implicit cross joins by default; callers can prepend
-    ``PRAGMA AnsiImplicitCrossJoin;`` when this returns True.
-    """
-    for node in expression.walk():
-        if isinstance(node, exp.Join):
-            if (
-                not node.args.get("kind")
-                and not node.args.get("on")
-                and not node.args.get("using")
-            ):
-                return True
-    return False
-
-
 class FlattenBy(exp.Expression):
     """YDB-specific FLATTEN [LIST|DICT] BY clause on a table reference."""
     arg_types = {"this": True, "expressions": True, "kind": False}
@@ -1384,12 +1364,6 @@ class YDB(Dialect):
             else:
                 sql = self._generate_create_table(expression)
 
-            # Prepend PRAGMA AnsiImplicitCrossJoin only when the query contains
-            # implicit cross joins (FROM t1, t2 syntax).  YDB disables them by
-            # default; the pragma restores standard SQL semantics.
-            if _has_implicit_cross_join(expression):
-                sql = "PRAGMA AnsiImplicitCrossJoin;\n" + sql
-
             return sql
 
         def unnest_subqueries(self, expression):
@@ -2180,15 +2154,15 @@ class YDB(Dialect):
         # we move the WHERE expression from ON, using literals
         def join_sql(self, expression: exp.Join) -> str:
             on_condition = expression.args.get("on")
-            join_kind = expression.kind or ""
+            using = expression.args.get("using")
 
-            # If LEFT/RIGHT/FULL JOIN has no ON clause, convert to CROSS JOIN
-            # YDB requires LEFT JOINs to have an ON clause
-            if not on_condition and any(
-                    kind in join_kind.upper() for kind in ["LEFT", "RIGHT", "FULL", "OUTER", ""]
-            ):
-                expression.set("kind", None)
-                expression.set("on", None)
+            # Any join with no ON/USING clause becomes an explicit CROSS JOIN.
+            # YDB requires an ON clause for outer joins, and emitting CROSS JOIN
+            # explicitly (instead of the comma-separated form) keeps the output
+            # valid without any extra pragma.
+            if not on_condition and not using:
+                expression.set("kind", "CROSS")
+                expression.set("side", None)
                 return super().join_sql(expression)
 
             if on_condition:
@@ -2256,18 +2230,11 @@ class YDB(Dialect):
                             on_condition = exp.and_(on_condition, cond)
                     expression.set("on", on_condition)
                 else:
-                    # No valid equality conditions
-                    # For LEFT/RIGHT/FULL JOINs, YDB requires ON clause, so convert to CROSS JOIN
-                    join_kind = expression.side or ""
-                    if any(
-                            kind in join_kind.upper() for kind in ["LEFT", "RIGHT", "FULL", "OUTER"]
-                    ):
-                        # Convert to CROSS JOIN by removing kind and ON
-                        expression.set("kind", None)
-                        expression.set("on", None)
-                        expression.set("side", "CROSS")
-                    else:
-                        expression.set("on", None)
+                    # No valid equality conditions remain on the JOIN — fall back
+                    # to an explicit CROSS JOIN regardless of the original kind.
+                    expression.set("kind", "CROSS")
+                    expression.set("on", None)
+                    expression.set("side", None)
 
                 if conditions_to_move:
                     select_stmt = expression.find_ancestor(exp.Select)

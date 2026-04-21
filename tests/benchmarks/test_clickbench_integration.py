@@ -41,18 +41,13 @@ def hits_table(ydb_pool):
 
 
 @pytest.mark.parametrize(
-    ("query", "expected", "query_number"),
-    [
-        (q, e, i)
-        for i, (q, e) in enumerate(zip(_queries, CLICKBENCH_EXPECTED), start=1)
-    ],
+    ("query", "expected"),
+    list(zip(_queries, CLICKBENCH_EXPECTED)),
     ids=[f"Q{i:02d}" for i in range(1, len(_queries) + 1)],
 )
 def test_clickbench_matches_clickhouse_oracle(
-    hits_table, ydb_pool, query, expected, query_number, request
+    hits_table, ydb_pool, query, expected, request
 ):
     yql = parse_one(query, dialect="clickhouse").sql(dialect="ydb")
     result = ydb_pool.execute_with_retries(yql)
-    assert_matches_clickhouse(
-        result, expected, query_label=request.node.name, query_number=query_number
-    )
+    assert_matches_clickhouse(result, expected, query_label=request.node.name)

@@ -79,10 +79,6 @@ CLICKBENCH_EXPECTED: list[list[list[object]] | None] = [
 
 assert len(CLICKBENCH_EXPECTED) == 43
 
-# Queries where YDB COLUMN store may return a subset of expected rows due to
-# non-deterministic LIMIT behaviour without ORDER BY (suspected YDB bug).
-CLICKBENCH_SUBSET_OK: frozenset[int] = frozenset({18})  # Q18: GROUP BY + LIMIT, no ORDER BY
-
 Q24_KEY_ROWS = [
     (1, 100, "https://www.google.com/search?q=test"),
     (3, 300, "https://google.com"),
@@ -135,15 +131,11 @@ def _row_almost_equal(a: Sequence[Any], b: Sequence[Any]) -> bool:
     return True
 
 
-def _multiset_equal(
-    expected: list[list[Any]], actual_rows: Sequence[Any], *, subset_ok: bool = False
-) -> None:
+def _multiset_equal(expected: list[list[Any]], actual_rows: Sequence[Any]) -> None:
     act = [_materialize_ydb_row(r) for r in actual_rows]
     exp = [tuple(_normalize_cell(c) for c in row) for row in expected]
-    if not subset_ok and len(exp) != len(act):
+    if len(exp) != len(act):
         raise AssertionError(f"row count: expected {len(exp)}, got {len(act)}")
-    if subset_ok and len(act) > len(exp):
-        raise AssertionError(f"row count: got {len(act)}, more than expected {len(exp)}")
     used = [False] * len(act)
     for er in exp:
         found = False
@@ -154,10 +146,20 @@ def _multiset_equal(
                 used[j] = True
                 found = True
                 break
-        if not subset_ok and not found:
+        if not found:
             raise AssertionError(f"no matching row for expected {er!r}; actual {act!r}")
     if not all(used):
         raise AssertionError(f"extra actual rows: {act!r}")
+
+
+def _collect_rows(result_sets: Sequence[Any]) -> list[Any]:
+    """YDB may split output across multiple result sets; flatten them all."""
+    rows: list[Any] = []
+    for rs in result_sets:
+        rs_rows = getattr(rs, "rows", None)
+        if rs_rows:
+            rows.extend(rs_rows)
+    return rows
 
 
 def assert_matches_clickhouse(
@@ -165,19 +167,17 @@ def assert_matches_clickhouse(
     expected: list[list[Any]] | None,
     *,
     query_label: str,
-    query_number: int | None = None,
 ) -> None:
     if result_sets is None or len(result_sets) == 0:
         raise AssertionError(f"{query_label}: empty result")
-    rows = result_sets[0].rows
+    rows = _collect_rows(result_sets)
     if expected is None:
         _assert_q24_select_star(rows, query_label)
         return
     if len(expected) == 0:
         assert len(rows) == 0, f"{query_label}: expected 0 rows, got {len(rows)}"
         return
-    subset_ok = query_number in CLICKBENCH_SUBSET_OK
-    _multiset_equal(expected, rows, subset_ok=subset_ok)
+    _multiset_equal(expected, rows)
 
 
 def _assert_q24_select_star(rows: Sequence[Any], query_label: str) -> None:
