@@ -1,3 +1,5 @@
+* Remove AnsiImplicitCrossJoin pragma
+
 ## 0.2.0 ##
 * Basic parser
 
