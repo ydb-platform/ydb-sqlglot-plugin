@@ -1,3 +1,4 @@
+## 0.2.1 ##
 * Remove AnsiImplicitCrossJoin pragma
 
 ## 0.2.0 ##
