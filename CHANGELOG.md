@@ -1,3 +1,4 @@
+## 0.2.2 ##
 * Fix backward compat with older sqlglot versions
 
 ## 0.2.1 ##
