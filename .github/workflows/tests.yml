@@ -30,6 +30,48 @@ jobs:
       - name: Run unit tests
         run: pytest tests/unit/
 
+  unit-sqlglot-compat:
+    # Guards against API changes across the sqlglot range supported in pyproject.toml.
+    # `latest` is unpinned so new releases surface as a CI failure instead of a user bug.
+    name: Unit tests (sqlglot ${{ matrix.sqlglot-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sqlglot-version:
+          - "28.6.0"     # minimum supported (pyproject.toml)
+          - "28.10.1"    # last 28.x; expression(cls, **kwargs) API
+          - "29.0.1"     # last 29.x
+          - "30.0.0"     # expression(instance) API introduced
+          - "latest"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Pin sqlglot==${{ matrix.sqlglot-version }}
+        if: matrix.sqlglot-version != 'latest'
+        run: pip install "sqlglot==${{ matrix.sqlglot-version }}"
+
+      - name: Upgrade sqlglot to latest
+        if: matrix.sqlglot-version == 'latest'
+        run: pip install --upgrade sqlglot
+
+      - name: Show resolved sqlglot version
+        run: python -c "import sqlglot; print('sqlglot', sqlglot.__version__)"
+
+      - name: Run unit tests
+        run: pytest tests/unit/
+
   integration:
     name: Integration tests (YDB)
     runs-on: ubuntu-latest

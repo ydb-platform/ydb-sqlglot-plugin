@@ -1,3 +1,4 @@
+import inspect as _inspect
 import re
 import typing as t
 
@@ -426,6 +427,13 @@ _YDB_GENERIC_TYPES = {
 }
 
 
+# sqlglot >= 30.0.0 changed Parser.expression() to take a pre-built instance instead of
+# (cls, **kwargs). Detect once so the YDB parser override below can support both APIs.
+_EXPRESSION_TAKES_INSTANCE = (
+    "instance" in _inspect.signature(parser.Parser.expression).parameters
+)
+
+
 def _reassemble_ctes(
     statements: t.List[t.Optional[exp.Expression]],
 ) -> t.List[t.Optional[exp.Expression]]:
@@ -581,6 +589,38 @@ class YDB(Dialect):
         def parse(self, raw_tokens, sql=None):
             statements = super().parse(raw_tokens, sql)
             return _reassemble_ctes(statements)
+
+        def expression(self, exp_class_or_instance, token=None, comments=None, **kwargs):
+            """Bridge sqlglot's two `Parser.expression()` calling conventions.
+
+            sqlglot < 30 expects ``expression(cls, **kwargs)`` and instantiates internally.
+            sqlglot >= 30 expects a pre-built ``expression(instance)`` and rejects kwargs.
+            Several call sites in this dialect (and a few in upstream code paths we exercise)
+            mix both styles, so normalise here before delegating.
+            """
+            if _EXPRESSION_TAKES_INSTANCE:
+                if not isinstance(exp_class_or_instance, exp.Expression):
+                    exp_class_or_instance = exp_class_or_instance(**kwargs)
+                return super().expression(
+                    exp_class_or_instance, token=token, comments=comments
+                )
+
+            if isinstance(exp_class_or_instance, exp.Expression):
+                # Old super() would attempt instance(**kwargs) -> "object is not callable".
+                instance = exp_class_or_instance
+                if token is not None:
+                    update_positions = getattr(instance, "update_positions", None)
+                    if update_positions is not None:
+                        update_positions(token)
+                if comments:
+                    instance.add_comments(comments)
+                else:
+                    self._add_comments(instance)
+                return self.validate_expression(instance)
+
+            return super().expression(
+                exp_class_or_instance, token=token, comments=comments, **kwargs
+            )
 
         def _parse_dcolon(self) -> t.Optional[exp.Expression]:
             return self._parse_function(anonymous=True) or self._parse_var(any_token=True)
@@ -759,7 +799,9 @@ class YDB(Dialect):
 
         def _parse_lambda_body(self, params):
             if (
-                    self._curr.token_type != TokenType.R_PAREN
+                    self._curr is None
+                    or self._curr.token_type != TokenType.R_PAREN
+                    or self._next is None
                     or self._next.token_type != TokenType.ARROW
             ):
                 return None
