@@ -1,6 +1,7 @@
 import inspect as _inspect
 import re
 import typing as t
+from collections import defaultdict
 
 from sqlglot import Generator, TokenType, exp, generator, parser, tokens, transforms
 from sqlglot.dialects.dialect import Dialect, NormalizationStrategy, concat_to_dpipe_sql, unit_to_var
@@ -176,6 +177,8 @@ def _wrap_udf_group_by(expression: exp.Expression) -> None:
         # Resolve each GROUP BY expression to its "effective" form
         # (expand alias references to the aliased expression).
         def _effective(e: exp.Expression) -> exp.Expression:
+            if isinstance(e, exp.Alias):
+                return e.this
             if isinstance(e, exp.Column):
                 name = e.name
                 if name in alias_to_expr:
@@ -417,6 +420,11 @@ class AssumeOrderBy(exp.Expression):
 class YdbTuple(exp.Expression):
     """YDB Tuple<T1, T2, ...> type — positional unnamed fields."""
     arg_types = {"expressions": True, "nullable": False}
+
+
+class YdbAtString(exp.Expression):
+    """YDB @@...@@ string literal."""
+    arg_types = {"this": True}
 
 
 # Container types that use Generic<T, ...> syntax in YDB
@@ -709,11 +717,12 @@ class YDB(Dialect):
 
         def _parse_table_alias(self, alias_tokens=None):
             # Prevent YDB-specific keywords from being consumed as table aliases
-            if self._curr and self._curr.text.upper() in ("FLATTEN", "ASSUME"):
+            if self._curr and self._curr.text.upper() in ("FLATTEN", "ASSUME", "VIEW"):
                 # Also check that what follows is a YDB construct, not a regular alias
                 if self._next and (
                     self._next.text.upper() in ("BY", "LIST", "DICT")
                     or self._next.token_type == TokenType.ORDER_BY
+                    or self._curr.text.upper() == "VIEW"
                 ):
                     return None
             return super()._parse_table_alias(alias_tokens=alias_tokens)
@@ -731,8 +740,70 @@ class YDB(Dialect):
                     this.set("order", self.expression(AssumeOrderBy(this=order)))
             return super()._parse_query_modifiers(this)
 
+        def _parse_group(self, skip_group_by_token: bool = False) -> t.Optional[exp.Group]:
+            # This mirrors sqlglot's Parser._parse_group control flow so YDB keeps
+            # support for GROUP BY modifiers (WITH ROLLUP, CUBE, GROUPING SETS,
+            # TOTALS). The YDB-specific change is parsing each group item through
+            # _parse_alias(..., explicit=True), enabling `GROUP BY expr AS alias`.
+            if not skip_group_by_token and not self._match(TokenType.GROUP_BY):
+                return None
+            comments = self._prev_comments
+
+            elements: dict[str, t.Any] = defaultdict(list)
+
+            if self._match(TokenType.ALL):
+                elements["all"] = True
+            elif self._match(TokenType.DISTINCT):
+                elements["all"] = False
+
+            if self._match_set(self.QUERY_MODIFIER_TOKENS, advance=False):
+                return self.expression(exp.Group(**elements), comments=comments)
+
+            def _parse_group_expression():
+                if self._match_set((TokenType.CUBE, TokenType.ROLLUP), advance=False):
+                    return None
+                return self._parse_alias(self._parse_disjunction(), explicit=True)
+
+            while True:
+                index = self._index
+
+                elements["expressions"].extend(self._parse_csv(_parse_group_expression))
+
+                before_with_index = self._index
+                with_prefix = self._match(TokenType.WITH)
+
+                if cube_or_rollup := self._parse_cube_or_rollup(with_prefix=with_prefix):
+                    key = "rollup" if isinstance(cube_or_rollup, exp.Rollup) else "cube"
+                    elements[key].append(cube_or_rollup)
+                elif grouping_sets := self._parse_grouping_sets():
+                    elements["grouping_sets"].append(grouping_sets)
+                elif self._match_text_seq("TOTALS"):
+                    elements["totals"] = True
+
+                if before_with_index <= self._index <= before_with_index + 1:
+                    self._retreat(before_with_index)
+                    break
+
+                if index == self._index:
+                    break
+
+            return self.expression(exp.Group(**elements), comments=comments)
+
         def _parse_table(self, *args, **kwargs) -> t.Optional[exp.Expression]:
+            if self._match(TokenType.L_BRACKET):
+                parts = []
+                while self._curr and not self._match(TokenType.R_BRACKET, advance=False):
+                    parts.append(self._curr.text)
+                    self._advance()
+                self._match(TokenType.R_BRACKET)
+                table = self.expression(exp.Table(this=exp.to_identifier("".join(parts))))
+                table.set("alias", self._parse_table_alias())
+                return table
+
             table = super()._parse_table(*args, **kwargs)
+            if table and self._match(TokenType.VIEW):
+                table.set("ydb_index_view", self._parse_id_var(any_token=True))
+                table.set("alias", self._parse_table_alias())
             if table and self._curr and self._curr.text.upper() == "FLATTEN":
                 self._advance()
                 kind: t.Optional[str] = None
@@ -762,6 +833,14 @@ class YDB(Dialect):
             return exp.EQ(this=key, expression=value)
 
         def _parse_primary(self) -> t.Optional[exp.Expression]:
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.PARAMETER
+                and self._next
+                and self._next.token_type == TokenType.PARAMETER
+            ):
+                return self._parse_at_raw_string()
+
             if self._match(TokenType.L_PAREN):
                 comments = self._prev_comments
                 query = self._parse_select()
@@ -796,6 +875,26 @@ class YDB(Dialect):
                 self._match_r_paren(expression=this)
                 return this
             return super()._parse_primary()
+
+        def _parse_at_raw_string(self) -> YdbAtString:
+            self._advance()
+            self._advance()
+
+            parts = []
+            while self._curr:
+                if (
+                    self._curr.token_type == TokenType.PARAMETER
+                    and self._next
+                    and self._next.token_type == TokenType.PARAMETER
+                ):
+                    self._advance()
+                    self._advance()
+                    break
+
+                parts.append(self._curr.text)
+                self._advance()
+
+            return self.expression(YdbAtString(this="".join(parts)))
 
         def _parse_lambda_body(self, params):
             if (
@@ -912,6 +1011,10 @@ class YDB(Dialect):
             prefix = f"{expression.db}/" if expression.db else ""
             sql = f"`{prefix}{expression.name}`"
 
+            ydb_index_view = self.sql(expression, "ydb_index_view")
+            if ydb_index_view:
+                sql += f" VIEW {ydb_index_view}"
+
             if expression.alias:
                 sql += f" AS {expression.alias}"
 
@@ -960,6 +1063,9 @@ class YDB(Dialect):
             inner = ", ".join(self.sql(e) for e in expression.expressions)
             sql = f"Tuple<{inner}>"
             return f"Optional<{sql}>" if expression.args.get("nullable") else sql
+
+        def ydbatstring_sql(self, expression: YdbAtString) -> str:
+            return f"@@{expression.this}@@"
 
         def alias_sql(self, expression: exp.Alias) -> str:
             alias = expression.args.get("alias")
@@ -2578,7 +2684,7 @@ class YDB(Dialect):
                     transformed.append(alias_map[gb_sql].copy())
                 elif isinstance(gb_expr, (exp.Column, exp.Identifier)):
                     # Add column AS alias so YDB resolves unambiguously.
-                    # Strip any table qualifier from the column (e.g. y.a → a).
+                    # Strip any table qualifier from the column (e.g. y.a -> a).
                     # Use the SELECT-level alias if the column is aliased there
                     # (e.g. `a_id AS _u_1` in SELECT means GROUP BY `a_id AS _u_1`).
                     column_name = gb_expr.alias_or_name
@@ -2599,6 +2705,8 @@ class YDB(Dialect):
             # Build the GROUP BY clause
             if group_by_items:
                 result = f" GROUP BY {group_by_items}"
+            elif not (rollup or cube or grouping_sets):
+                return ""
             else:
                 result = " GROUP BY"
 
@@ -2699,6 +2807,7 @@ class YDB(Dialect):
             FlattenBy: lambda self, e: self.flattenby_sql(e),
             AssumeOrderBy: lambda self, e: self.assumeorderby_sql(e),
             YdbTuple: lambda self, e: self.ydbtuple_sql(e),
+            YdbAtString: lambda self, e: self.ydbatstring_sql(e),
             exp.Create: create_sql,
             exp.DefaultColumnConstraint: lambda self, e: "",
             exp.DateTrunc: _date_trunc_sql,

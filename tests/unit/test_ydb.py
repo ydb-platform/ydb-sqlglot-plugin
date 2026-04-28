@@ -177,6 +177,33 @@ class TestYDBTransforms(Validator):
         # db part preserved as-is; use make_db_name_lower() helper to lowercase it
         self.assertEqual(ydb("SELECT * FROM 'A'.'B'"), "SELECT * FROM `A/B`")
 
+    def test_bracket_table_path(self):
+        self.assertEqual(
+            parse_one(
+                "SELECT * FROM [rtlog-index/request/2026-01-25T08:00:00]",
+                dialect="ydb",
+            ).sql(dialect="ydb"),
+            "SELECT * FROM `rtlog-index/request/2026-01-25T08:00:00`",
+        )
+
+    def test_table_view_index(self):
+        self.assertEqual(
+            parse_one(
+                "SELECT * FROM tracks VIEW tracks_session_id_groupstamp_index WHERE groupstamp >= 0",
+                dialect="ydb",
+            ).sql(dialect="ydb"),
+            "SELECT * FROM `tracks` VIEW tracks_session_id_groupstamp_index WHERE groupstamp >= 0",
+        )
+
+    def test_at_raw_string_literal(self):
+        self.assertEqual(
+            parse_one(
+                "SELECT * FROM `tracks` WHERE session_id IN (@@21b7d5b7-efe9-f94c-b6ff-2362c1b00fd4@@)",
+                dialect="ydb",
+            ).sql(dialect="ydb"),
+            "SELECT * FROM `tracks` WHERE session_id IN (@@21b7d5b7-efe9-f94c-b6ff-2362c1b00fd4@@)",
+        )
+
     def test_table_name_lower_case_helper(self):
         parsed = table_names_to_lower_case(parse_one("SELECT * FROM B, (SELECT * from D) as E"))
         self.assertEqual(parsed.sql(), "SELECT * FROM b, (SELECT * FROM d) AS E")
@@ -790,4 +817,22 @@ class TestYDBFromClickHouse(unittest.TestCase):
         self.assertEqual(
             self.ch("SELECT a, b, count() FROM t GROUP BY a, b"),
             "SELECT a, b, COUNT(*) FROM `t` GROUP BY a AS a, b AS b",
+        )
+
+    def test_group_by_alias_ydb_roundtrip(self):
+        self.assertEqual(
+            parse_one("SELECT v, COUNT(*) FROM `t` GROUP BY v AS v", dialect="ydb").sql(dialect="ydb"),
+            "SELECT v, COUNT(*) FROM `t` GROUP BY v AS v",
+        )
+
+    def test_group_by_column_gets_ydb_alias(self):
+        self.assertEqual(
+            parse_one("SELECT v, COUNT(*) FROM `t` GROUP BY v", dialect="ydb").sql(dialect="ydb"),
+            "SELECT v, COUNT(*) FROM `t` GROUP BY v AS v",
+        )
+
+    def test_group_by_positional_constant_is_removed(self):
+        self.assertEqual(
+            self.ch("SELECT 1, count() FROM t GROUP BY 1"),
+            "SELECT 1, COUNT(*) FROM `t`",
         )

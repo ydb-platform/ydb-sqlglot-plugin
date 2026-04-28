@@ -75,6 +75,31 @@ LEFT JOIN (
 
 The same rewriting applies to `EXISTS`, `IN (subquery)`, and `ANY/ALL` subqueries.
 
+#### GROUP BY aliases
+
+YDB accepts aliases directly inside `GROUP BY` items. The generator uses this
+form for grouped columns so later clauses and decorrelated subqueries can refer
+to a stable grouping name:
+
+```sql
+-- input
+SELECT user_id, COUNT(*) FROM events GROUP BY user_id
+
+-- output
+SELECT user_id, COUNT(*) FROM `events` GROUP BY user_id AS user_id
+```
+
+If a grouped column is selected under a generated alias, the `GROUP BY` item uses
+that alias as well:
+
+```sql
+SELECT user_id AS _u_1, COUNT(*) FROM `events` GROUP BY user_id AS _u_1
+```
+
+Positional `GROUP BY` references are expanded before generation. When a
+positional reference points to a constant expression, the grouping item is
+removed because YDB rejects grouping by constants.
+
 ---
 
 ### YDB → any SQL
@@ -92,6 +117,7 @@ The plugin parses YDB/YQL back into sqlglot's AST, enabling round-trips, YDB-to-
 | `Optional<T>` / `T?` | `CAST(x AS Optional<Utf8>)` |
 | Container types | `CAST(x AS List<Int32>)`, `Dict<Utf8, Int64>`, `Set<Utf8>`, `Tuple<Int32, Utf8>` |
 | `ASSUME ORDER BY` | `SELECT * FROM t ASSUME ORDER BY id` |
+| `GROUP BY expr AS alias` | `SELECT v, COUNT(*) FROM t GROUP BY v AS v` |
 | Named expressions | `$t = (SELECT 1 AS x)` |
 | `PRAGMA` | `PRAGMA AnsiImplicitCrossJoin` |
 
