@@ -821,6 +821,69 @@ class TestYDBAdvancedSyntax(Validator):
     def test_utf8_string_literal_suffix(self):
         self.validate_identity("SELECT 'value'u AS value")
 
+    def test_json_value_returning_type(self):
+        self.validate_identity(
+            "SELECT JSON_VALUE(payload, '$.size' RETURNING Int64) AS size FROM `events`"
+        )
+
+    def test_json_value_passing_and_on_clauses(self):
+        self.validate_identity(
+            "SELECT JSON_VALUE(payload, '$.value + $delta' PASSING 1 AS delta RETURNING Int64 DEFAULT 0 ON EMPTY ERROR ON ERROR)"
+        )
+
+    def test_json_value_null_on_empty_and_default_on_error(self):
+        self.validate_identity(
+            "SELECT JSON_VALUE(payload, '$.age' RETURNING Uint64 NULL ON EMPTY DEFAULT 20 ON ERROR)"
+        )
+
+    def test_json_value_multiple_passing_items(self):
+        self.validate_identity(
+            "SELECT JSON_VALUE(payload, '$.timestamp - $Now + $Hour' PASSING 24 * 60 AS Hour, CurrentUtcTimestamp() AS \"Now\" RETURNING Timestamp)"
+        )
+
+    def test_json_value_default_string_on_empty(self):
+        self.validate_identity(
+            "SELECT JSON_VALUE(payload, '$.name' RETURNING String DEFAULT \"empty\" ON EMPTY NULL ON ERROR)",
+            write_sql="SELECT JSON_VALUE(payload, '$.name' RETURNING String DEFAULT 'empty' ON EMPTY NULL ON ERROR)",
+        )
+
+    def test_json_exists_simple(self):
+        self.validate_identity("SELECT JSON_EXISTS(payload, '$.name') FROM `events`")
+
+    def test_json_exists_passing_and_on_error(self):
+        cases = [
+            "SELECT JSON_EXISTS(payload, '$.items[$index]' PASSING 0 AS index TRUE ON ERROR)",
+            "SELECT JSON_EXISTS(payload, '$.items[$Index]' PASSING 0 AS \"Index\" FALSE ON ERROR)",
+            "SELECT JSON_EXISTS(payload, '$.name' UNKNOWN ON ERROR)",
+            "SELECT JSON_EXISTS(payload, '$.name' ERROR ON ERROR)",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
+    def test_json_query_simple(self):
+        self.validate_identity("SELECT JSON_QUERY(payload, '$.items') FROM `events`")
+
+    def test_json_query_wrapper_modes(self):
+        cases = [
+            "SELECT JSON_QUERY(payload, '$.items' WITHOUT ARRAY WRAPPER)",
+            "SELECT JSON_QUERY(payload, '$.items' WITH ARRAY WRAPPER)",
+            "SELECT JSON_QUERY(payload, '$.items' WITH CONDITIONAL ARRAY WRAPPER)",
+            "SELECT JSON_QUERY(payload, '$.items' WITH UNCONDITIONAL ARRAY WRAPPER)",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
+    def test_json_query_passing_and_on_clauses(self):
+        cases = [
+            "SELECT JSON_QUERY(payload, '$.items[$Index]' PASSING 0 AS \"Index\" WITH CONDITIONAL ARRAY WRAPPER NULL ON EMPTY ERROR ON ERROR)",
+            "SELECT JSON_QUERY(payload, '$.items' EMPTY ARRAY ON EMPTY EMPTY OBJECT ON ERROR)",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
     def test_tuple_expression_in_named_query_and_in_filter(self):
         self.validate_identity(
             "$keys = SELECT (a, b) FROM `lookup`;\n"
@@ -839,6 +902,7 @@ class TestYDBAdvancedSyntax(Validator):
         )
 
     def test_table_valued_function_roundtrip_stable(self):
+        self.validate_identity("SELECT * FROM AS_TABLE($Input) AS k")
         self.assert_roundtrip_stable(
             "DECLARE $Input AS List<Struct<`shard`: Int64>>;\n"
             "SELECT t.`shard`\n"

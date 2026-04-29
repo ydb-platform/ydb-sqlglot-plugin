@@ -432,6 +432,45 @@ class YdbPostfixCall(exp.Expression):
     arg_types = {"this": True, "expressions": False}
 
 
+class YdbJsonValue(exp.Expression):
+    """YDB JSON_VALUE with PASSING, RETURNING, ON EMPTY, and ON ERROR clauses."""
+    arg_types = {
+        "this": True,
+        "path": True,
+        "passing": False,
+        "returning": False,
+        "on_empty": False,
+        "on_error": False,
+    }
+
+
+class YdbJsonQuery(exp.Expression):
+    """YDB JSON_QUERY with PASSING, WRAPPER, ON EMPTY, and ON ERROR clauses."""
+    arg_types = {
+        "this": True,
+        "path": True,
+        "passing": False,
+        "wrapper": False,
+        "on_empty": False,
+        "on_error": False,
+    }
+
+
+class YdbJsonExists(exp.Expression):
+    """YDB JSON_EXISTS with PASSING and ON ERROR clauses."""
+    arg_types = {
+        "this": True,
+        "path": True,
+        "passing": False,
+        "on_error": False,
+    }
+
+
+class YdbJsonPassingItem(exp.Expression):
+    """One JSON PASSING item: <expression> AS <variable name>."""
+    arg_types = {"this": True, "alias": False, "quoted": False}
+
+
 class YdbLambdaBlock(exp.Expression):
     """YDB lambda body with local named expressions followed by RETURN."""
     arg_types = {"this": True, "expressions": False}
@@ -616,6 +655,13 @@ class YDB(Dialect):
             TokenType.PARAMETER: lambda self: self._parse_ydb_named_expr(),
         }
 
+        FUNCTION_PARSERS = {
+            **parser.Parser.FUNCTION_PARSERS,
+            "JSON_EXISTS": lambda self: self._parse_ydb_json_exists(),
+            "JSON_QUERY": lambda self: self._parse_ydb_json_query(),
+            "JSON_VALUE": lambda self: self._parse_ydb_json_value(),
+        }
+
         PRIMARY_PARSERS = {
             **parser.Parser.PRIMARY_PARSERS,
             TokenType.STRING: lambda self, token: self._parse_ydb_string(token),
@@ -785,6 +831,170 @@ class YDB(Dialect):
                 literal.meta["ydb_string_suffix"] = self._curr.text
                 self._advance()
             return literal
+
+        def _parse_ydb_json_value(self) -> YdbJsonValue:
+            this = self._parse_bitwise()
+            self._match(TokenType.COMMA)
+            path = self._parse_bitwise()
+            passing = self._parse_ydb_json_passing()
+            returning = self._match(TokenType.RETURNING) and self._parse_type()
+            on_empty = self._parse_ydb_json_on_clause("EMPTY")
+            on_error = self._parse_ydb_json_on_clause("ERROR")
+            return self.expression(
+                YdbJsonValue(
+                    this=this,
+                    path=path,
+                    passing=passing,
+                    returning=returning,
+                    on_empty=on_empty,
+                    on_error=on_error,
+                )
+            )
+
+        def _parse_ydb_json_exists(self) -> YdbJsonExists:
+            this = self._parse_bitwise()
+            self._match(TokenType.COMMA)
+            path = self._parse_bitwise()
+            passing = self._parse_ydb_json_passing()
+            on_error = self._parse_ydb_json_exists_on_error()
+            return self.expression(
+                YdbJsonExists(
+                    this=this,
+                    path=path,
+                    passing=passing,
+                    on_error=on_error,
+                )
+            )
+
+        def _parse_ydb_json_query(self) -> YdbJsonQuery:
+            this = self._parse_bitwise()
+            self._match(TokenType.COMMA)
+            path = self._parse_bitwise()
+            passing = self._parse_ydb_json_passing()
+            wrapper = self._parse_ydb_json_query_wrapper()
+            on_empty = self._parse_ydb_json_query_on_clause("EMPTY")
+            on_error = self._parse_ydb_json_query_on_clause("ERROR")
+            return self.expression(
+                YdbJsonQuery(
+                    this=this,
+                    path=path,
+                    passing=passing,
+                    wrapper=wrapper,
+                    on_empty=on_empty,
+                    on_error=on_error,
+                )
+            )
+
+        def _parse_ydb_json_passing(self) -> list[exp.Expression]:
+            if not (self._curr and self._curr.text.upper() == "PASSING"):
+                return []
+            self._advance()
+            return self._parse_csv(self._parse_ydb_json_passing_item)
+
+        def _parse_ydb_json_passing_item(self) -> t.Optional[exp.Expression]:
+            value = self._parse_assignment()
+            if not value:
+                return None
+            self._match(TokenType.ALIAS)
+            alias = self._parse_id_var(any_token=True)
+            quoted = bool(isinstance(alias, exp.Identifier) and alias.args.get("quoted"))
+            return self.expression(
+                YdbJsonPassingItem(
+                    this=value,
+                    alias=alias.name if alias else "",
+                    quoted=quoted,
+                )
+            )
+
+        def _parse_ydb_json_on_clause(self, name: str) -> t.Optional[exp.Expression]:
+            if not self._curr:
+                return None
+
+            default_value = None
+            action = None
+            if self._match(TokenType.DEFAULT):
+                default_value = self._parse_assignment()
+                action = "DEFAULT"
+            elif self._match(TokenType.NULL):
+                action = "NULL"
+            elif self._curr.text.upper() == "ERROR":
+                self._advance()
+                action = "ERROR"
+            else:
+                return None
+
+            if not (self._match(TokenType.ON) and self._curr and self._curr.text.upper() == name):
+                return None
+            self._advance()
+
+            return exp.Var(this=action, expression=default_value)
+
+        def _parse_ydb_json_exists_on_error(self) -> t.Optional[exp.Expression]:
+            action = None
+            if self._match(TokenType.TRUE):
+                action = "TRUE"
+            elif self._match(TokenType.FALSE):
+                action = "FALSE"
+            elif self._match(TokenType.UNKNOWN):
+                action = "UNKNOWN"
+            elif self._curr and self._curr.text.upper() == "ERROR":
+                self._advance()
+                action = "ERROR"
+            else:
+                return None
+
+            if not (self._match(TokenType.ON) and self._curr and self._curr.text.upper() == "ERROR"):
+                return None
+            self._advance()
+            return exp.Var(this=action)
+
+        def _parse_ydb_json_query_wrapper(self) -> t.Optional[exp.Var]:
+            if self._curr and self._curr.text.upper() == "WITHOUT":
+                self._advance()
+                self._match(TokenType.ARRAY)
+                if self._curr and self._curr.text.upper() == "WRAPPER":
+                    self._advance()
+                    return exp.Var(this="WITHOUT ARRAY WRAPPER")
+                return None
+
+            if not (self._curr and self._curr.text.upper() == "WITH"):
+                return None
+            self._advance()
+
+            mode = ""
+            if self._curr and self._curr.text.upper() in ("CONDITIONAL", "UNCONDITIONAL"):
+                mode = self._curr.text.upper()
+                self._advance()
+            self._match(TokenType.ARRAY)
+            if self._curr and self._curr.text.upper() == "WRAPPER":
+                self._advance()
+            else:
+                return None
+            wrapper = f"WITH {mode + ' ' if mode else ''}ARRAY WRAPPER"
+            return exp.Var(this=wrapper)
+
+        def _parse_ydb_json_query_on_clause(self, name: str) -> t.Optional[exp.Var]:
+            action = None
+            if self._match(TokenType.NULL):
+                action = "NULL"
+            elif self._curr and self._curr.text.upper() == "ERROR":
+                self._advance()
+                action = "ERROR"
+            elif self._curr and self._curr.text.upper() == "EMPTY":
+                self._advance()
+                if self._match(TokenType.ARRAY):
+                    action = "EMPTY ARRAY"
+                elif self._match(TokenType.OBJECT):
+                    action = "EMPTY OBJECT"
+                else:
+                    return None
+            else:
+                return None
+
+            if not (self._match(TokenType.ON) and self._curr and self._curr.text.upper() == name):
+                return None
+            self._advance()
+            return exp.Var(this=action)
 
         def _parse_unary(self) -> t.Optional[exp.Expression]:
             return self._parse_ydb_postfix_calls(super()._parse_unary())
@@ -1240,6 +1450,11 @@ class YDB(Dialect):
                 var = self.sql(expression, "this")
                 alias = f" AS {expression.alias}" if expression.alias else ""
                 return f"{var}{alias}"
+            if isinstance(expression.this, exp.Func):
+                sql = self.sql(expression, "this")
+                if expression.alias:
+                    sql += f" AS {expression.alias}"
+                return sql
             prefix = f"{expression.db}/" if expression.db else ""
             sql = f"`{prefix}{expression.name}`"
 
@@ -1308,6 +1523,79 @@ class YDB(Dialect):
             this = self.sql(expression, "this")
             args = self.expressions(expression, flat=True)
             return f"{this}({args})"
+
+        def ydbjsonvalue_sql(self, expression: YdbJsonValue) -> str:
+            args = [self.sql(expression, "this"), self.sql(expression, "path")]
+            passing = expression.args.get("passing") or []
+            if passing:
+                passing_sql = ", ".join(self.sql(item) for item in passing)
+                args[-1] = f"{args[-1]} PASSING {passing_sql}"
+
+            returning = self.sql(expression, "returning")
+            if returning:
+                args[-1] = f"{args[-1]} RETURNING {returning}"
+
+            on_empty = self._ydb_json_on_clause_sql(expression.args.get("on_empty"), "EMPTY")
+            if on_empty:
+                args[-1] = f"{args[-1]} {on_empty}"
+
+            on_error = self._ydb_json_on_clause_sql(expression.args.get("on_error"), "ERROR")
+            if on_error:
+                args[-1] = f"{args[-1]} {on_error}"
+
+            return f"JSON_VALUE({', '.join(args)})"
+
+        def ydbjsonexists_sql(self, expression: YdbJsonExists) -> str:
+            args = [self.sql(expression, "this"), self.sql(expression, "path")]
+            passing = expression.args.get("passing") or []
+            if passing:
+                passing_sql = ", ".join(self.sql(item) for item in passing)
+                args[-1] = f"{args[-1]} PASSING {passing_sql}"
+
+            on_error = expression.args.get("on_error")
+            if on_error:
+                args[-1] = f"{args[-1]} {on_error.name.upper()} ON ERROR"
+
+            return f"JSON_EXISTS({', '.join(args)})"
+
+        def ydbjsonquery_sql(self, expression: YdbJsonQuery) -> str:
+            args = [self.sql(expression, "this"), self.sql(expression, "path")]
+            passing = expression.args.get("passing") or []
+            if passing:
+                passing_sql = ", ".join(self.sql(item) for item in passing)
+                args[-1] = f"{args[-1]} PASSING {passing_sql}"
+
+            wrapper = expression.args.get("wrapper")
+            if wrapper:
+                args[-1] = f"{args[-1]} {wrapper.name.upper()}"
+
+            on_empty = expression.args.get("on_empty")
+            if on_empty:
+                args[-1] = f"{args[-1]} {on_empty.name.upper()} ON EMPTY"
+
+            on_error = expression.args.get("on_error")
+            if on_error:
+                args[-1] = f"{args[-1]} {on_error.name.upper()} ON ERROR"
+
+            return f"JSON_QUERY({', '.join(args)})"
+
+        def _ydb_json_on_clause_sql(
+            self,
+            expression: t.Optional[exp.Expression],
+            name: str,
+        ) -> str:
+            if not expression:
+                return ""
+            action = expression.name.upper()
+            if action == "DEFAULT":
+                return f"DEFAULT {self.sql(expression, 'expression')} ON {name}"
+            return f"{action} ON {name}"
+
+        def ydbjsonpassingitem_sql(self, expression: YdbJsonPassingItem) -> str:
+            alias = expression.args.get("alias") or ""
+            if expression.args.get("quoted"):
+                alias = f'"{alias}"'
+            return f"{self.sql(expression, 'this')} AS {alias}"
 
         def ydblambdablock_sql(self, expression: YdbLambdaBlock) -> str:
             assignments = [self.sql(assignment) for assignment in expression.expressions]
@@ -3119,6 +3407,10 @@ class YDB(Dialect):
             YdbTuple: lambda self, e: self.ydbtuple_sql(e),
             YdbAtString: lambda self, e: self.ydbatstring_sql(e),
             YdbPostfixCall: lambda self, e: self.ydbpostfixcall_sql(e),
+            YdbJsonExists: lambda self, e: self.ydbjsonexists_sql(e),
+            YdbJsonQuery: lambda self, e: self.ydbjsonquery_sql(e),
+            YdbJsonValue: lambda self, e: self.ydbjsonvalue_sql(e),
+            YdbJsonPassingItem: lambda self, e: self.ydbjsonpassingitem_sql(e),
             YdbLambdaBlock: lambda self, e: self.ydblambdablock_sql(e),
             exp.Create: create_sql,
             exp.DefaultColumnConstraint: lambda self, e: "",
