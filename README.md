@@ -119,6 +119,8 @@ The plugin parses YDB/YQL back into sqlglot's AST, enabling round-trips, YDB-to-
 | `ASSUME ORDER BY` | `SELECT * FROM t ASSUME ORDER BY id` |
 | `GROUP BY expr AS alias` | `SELECT v, COUNT(*) FROM t GROUP BY v AS v` |
 | Named expressions | `$t = (SELECT 1 AS x)` |
+| Lambda expressions | `($x, $y?) -> ($x + COALESCE($y, 0))`, `($y) -> { $p = "x"; RETURN $p \|\| $y }` |
+| `IN COMPACT` | `WHERE key IN COMPACT $values` |
 | `PRAGMA` | `PRAGMA AnsiImplicitCrossJoin` |
 
 Table names without backticks are accepted on input; the generator always produces backtick-quoted output.
@@ -203,10 +205,29 @@ Functions below are recognized by sqlglot as standard SQL expressions and transl
 |---|---|
 | `ARRAY(v1, v2, ...)` | `AsList(v1, v2, ...)` |
 | `ARRAY_LENGTH(x)` / `ARRAY_SIZE(x)` | `ListLength(x)` |
-| `ARRAY_FILTER(arr, x -> cond)` | `ListFilter(arr, ($x) -> {RETURN cond})` |
-| `ARRAY_ANY(arr, x -> cond)` | `ListHasItems(ListFilter(arr, ($x) -> {RETURN cond}))` |
+| `ARRAY_FILTER(arr, x -> cond)` | `ListFilter(arr, ($x) -> (cond))` |
+| `ARRAY_ANY(arr, x -> cond)` | `ListHasItems(ListFilter(arr, ($x) -> (cond)))` |
 | `ARRAY_AGG(x)` | `AGGREGATE_LIST(x)` |
 | `UNNEST(x)` | `FLATTEN BY x` |
+
+Lambda expressions are represented with sqlglot's standard `exp.Lambda` AST node.
+When a source dialect parses lambdas, the YDB generator emits YQL lambda syntax:
+
+```sql
+-- DuckDB input
+SELECT list_filter(arr, x -> x > 0) FROM t
+
+-- YDB output
+SELECT ListFilter(arr, ($x) -> ($x > 0)) FROM `t`
+```
+
+YDB input also supports documented YQL lambda forms, including optional
+arguments and block bodies with local named expressions:
+
+```sql
+($x, $y?) -> ($x + COALESCE($y, 0));
+($y) -> { $prefix = "x"; RETURN $prefix || $y; };
+```
 
 ### Conditional / math
 
