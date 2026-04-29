@@ -773,6 +773,86 @@ class TestYDBParser(Validator):
         self.assertEqual(generated, regenerated)
 
 
+class TestYDBAdvancedSyntax(Validator):
+    """Parser and generator coverage for less common YQL constructs."""
+
+    dialect = "ydb"
+    maxDiff = None
+
+    def assert_roundtrip_stable(self, sql: str) -> None:
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        regenerated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(generated, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(generated, regenerated)
+
+    def test_variable_call_expression(self):
+        sql = (
+            "$grep = Re2::Grep($needle);\n"
+            "SELECT * FROM `t` WHERE $grep(Unicode::ToLower(name))"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(
+            "$grep = Re2::Grep($needle);\nSELECT * FROM `t` WHERE $grep(Unicode::ToLower(name))",
+            generated,
+        )
+
+    def test_curried_module_function_call(self):
+        self.validate_identity(
+            "SELECT DateTime::Format('%Y-%m-%d')(created_at) AS created_at FROM `t`"
+        )
+
+    def test_struct_type_with_quoted_field_name(self):
+        self.validate_identity(
+            "DECLARE $items AS List<Struct<'source_id': Utf8>>",
+            write_sql="DECLARE $items AS List<Struct<'source_id': Utf8>>",
+        )
+
+    def test_utf8_string_literal_suffix(self):
+        self.validate_identity("SELECT 'value'u AS value")
+
+    def test_tuple_expression_in_named_query_and_in_filter(self):
+        self.validate_identity(
+            "$keys = SELECT (a, b) FROM `lookup`;\n"
+            "SELECT * FROM `items` WHERE (a, b) IN $keys",
+            write_sql="$keys = (SELECT (a, b) FROM `lookup`);\n\n"
+            "SELECT * FROM `items` WHERE (a, b) IN $keys",
+        )
+
+    def test_join_named_query_roundtrip_does_not_generate_invalid_with(self):
+        self.assert_roundtrip_stable(
+            "$user_likes = (SELECT * FROM `likes` WHERE user_id = $user_id);\n"
+            "SELECT p.id, ul.post_id IS NOT NULL AS liked\n"
+            "FROM `posts` AS p\n"
+            "LEFT JOIN $user_likes AS ul ON ul.post_id = p.id\n"
+            "WHERE p.id = $id"
+        )
+
+    def test_table_valued_function_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            "DECLARE $Input AS List<Struct<`shard`: Int64>>;\n"
+            "SELECT t.`shard`\n"
+            "FROM AS_TABLE($Input) AS k\n"
+            "JOIN `target` AS t ON t.`shard` = k.`shard`"
+        )
+
+    def test_multi_equality_join_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            "SELECT * FROM `a` AS a\n"
+            "JOIN `b` AS b ON a.id = b.id AND a.kind = b.kind"
+        )
+
+
 # ---------------------------------------------------------------------------
 # YDB → other dialects
 # ---------------------------------------------------------------------------

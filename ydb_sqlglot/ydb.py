@@ -427,6 +427,11 @@ class YdbAtString(exp.Expression):
     arg_types = {"this": True}
 
 
+class YdbPostfixCall(exp.Expression):
+    """YDB call of an expression result, e.g. $grep(x) or DateTime::Format(fmt)(ts)."""
+    arg_types = {"this": True, "expressions": False}
+
+
 class YdbLambdaBlock(exp.Expression):
     """YDB lambda body with local named expressions followed by RETURN."""
     arg_types = {"this": True, "expressions": False}
@@ -611,6 +616,11 @@ class YDB(Dialect):
             TokenType.PARAMETER: lambda self: self._parse_ydb_named_expr(),
         }
 
+        PRIMARY_PARSERS = {
+            **parser.Parser.PRIMARY_PARSERS,
+            TokenType.STRING: lambda self, token: self._parse_ydb_string(token),
+        }
+
         def parse(self, raw_tokens, sql=None):
             self.reset()
             self.sql = sql or ""
@@ -763,6 +773,56 @@ class YDB(Dialect):
                 exp.DeclareItem(this=name, kind=kind),
                 comments=comments,
             )
+
+        def _parse_ydb_string(self, token: tokens.Token) -> exp.Literal:
+            literal = self.expression(exp.Literal(this=token.text, is_string=True), token)
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.VAR
+                and self._curr.text.lower() == "u"
+                and token.end + 1 == self._curr.start
+            ):
+                literal.meta["ydb_string_suffix"] = self._curr.text
+                self._advance()
+            return literal
+
+        def _parse_unary(self) -> t.Optional[exp.Expression]:
+            return self._parse_ydb_postfix_calls(super()._parse_unary())
+
+        def _parse_type(
+            self,
+            parse_interval: bool = True,
+            fallback_to_identifier: bool = False,
+        ) -> t.Optional[exp.Expression]:
+            if (
+                self._curr
+                and self._next
+                and self._curr.token_type == TokenType.STRING
+                and self._next.token_type == TokenType.VAR
+                and self._next.text.lower() == "u"
+                and self._curr.end + 1 == self._next.start
+            ):
+                token = self._curr
+                suffix = self._next.text
+                self._advance(2)
+                literal = self.expression(exp.Literal(this=token.text, is_string=True), token)
+                literal.meta["ydb_string_suffix"] = suffix
+                return literal
+
+            return super()._parse_type(
+                parse_interval=parse_interval,
+                fallback_to_identifier=fallback_to_identifier,
+            )
+
+        def _parse_ydb_postfix_calls(
+            self,
+            expression: t.Optional[exp.Expression],
+        ) -> t.Optional[exp.Expression]:
+            while expression is not None and self._match(TokenType.L_PAREN):
+                args = self._parse_function_args(alias=True)
+                self._match_r_paren(expression)
+                expression = self.expression(YdbPostfixCall(this=expression, expressions=args))
+            return expression
 
         def _parse_types(self, *args, **kwargs) -> t.Optional[exp.Expression]:
             # YDB generic types use Name<...> syntax; token type varies by keyword status
@@ -1215,6 +1275,11 @@ class YDB(Dialect):
             expr = self.sql(expression, "expression")
             return f"{this}::{expr}"
 
+        def literal_sql(self, expression: exp.Literal) -> str:
+            sql = super().literal_sql(expression)
+            suffix = expression.meta.get("ydb_string_suffix")
+            return f"{sql}{suffix}" if suffix else sql
+
         def declareitem_sql(self, expression: exp.DeclareItem) -> str:
             name = self.sql(expression, "this")
             kind = self.sql(expression, "kind")
@@ -1238,6 +1303,11 @@ class YDB(Dialect):
 
         def ydbatstring_sql(self, expression: YdbAtString) -> str:
             return f"@@{expression.this}@@"
+
+        def ydbpostfixcall_sql(self, expression: YdbPostfixCall) -> str:
+            this = self.sql(expression, "this")
+            args = self.expressions(expression, flat=True)
+            return f"{this}({args})"
 
         def ydblambdablock_sql(self, expression: YdbLambdaBlock) -> str:
             assignments = [self.sql(assignment) for assignment in expression.expressions]
@@ -1417,6 +1487,12 @@ class YDB(Dialect):
             """
             nullable = expression.args.get("nullable")
 
+            def _struct_field_sql(field: exp.Expression) -> str:
+                if isinstance(field, exp.Identifier) and field.args.get("quoted"):
+                    name = field.name.replace("'", "\\'")
+                    return f"'{name}'"
+                return self.sql(field)
+
             # YDB generic container types rendered with <> syntax and correct casing
             if expression.args.get("nested"):
                 type_value = expression.this
@@ -1436,7 +1512,7 @@ class YDB(Dialect):
 
                 if type_value == exp.DataType.Type.STRUCT:
                     inner = ", ".join(
-                        f"{self.sql(col, 'this')}: {self.sql(col, 'kind')}"
+                        f"{_struct_field_sql(col.this)}: {self.sql(col, 'kind')}"
                         for col in expression.expressions
                         if isinstance(col, exp.ColumnDef)
                     )
@@ -1768,7 +1844,7 @@ class YDB(Dialect):
                                 f"decorrelated in YDB — rewrite manually using a $variable subquery"
                             )
                     continue
-                if scope.external_columns:
+                if scope.external_columns and scope.scope_type != ScopeType.CTE:
                     self.decorrelate(select, parent, scope.external_columns, next_alias_name)
                 if scope.scope_type == ScopeType.SUBQUERY:
                     self.unnest(select, parent, next_alias_name)
@@ -1822,6 +1898,9 @@ class YDB(Dialect):
             """
             Unnests a subquery by transforming it into a join
             """
+            if isinstance(select.parent, exp.CTE):
+                return
+
             if len(select.selects) > 1:
                 return
             self.ensure_select_aliases(select)
@@ -3039,6 +3118,7 @@ class YDB(Dialect):
             AssumeOrderBy: lambda self, e: self.assumeorderby_sql(e),
             YdbTuple: lambda self, e: self.ydbtuple_sql(e),
             YdbAtString: lambda self, e: self.ydbatstring_sql(e),
+            YdbPostfixCall: lambda self, e: self.ydbpostfixcall_sql(e),
             YdbLambdaBlock: lambda self, e: self.ydblambdablock_sql(e),
             exp.Create: create_sql,
             exp.DefaultColumnConstraint: lambda self, e: "",
