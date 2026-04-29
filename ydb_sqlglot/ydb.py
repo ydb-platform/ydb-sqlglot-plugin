@@ -691,6 +691,17 @@ class YDB(Dialect):
                         nested=True,
                     )
 
+                if name == "Struct":
+                    self._advance()  # consume 'Struct'
+                    self._advance()  # consume '<'
+                    fields = self._parse_csv(self._parse_ydb_struct_field)
+                    self._match(TokenType.GT)
+                    return exp.DataType(
+                        this=exp.DataType.Type.STRUCT,
+                        expressions=[field for field in fields if field],
+                        nested=True,
+                    )
+
                 if name == "Tuple":
                     self._advance()  # consume 'Tuple'
                     self._advance()  # consume '<'
@@ -714,6 +725,20 @@ class YDB(Dialect):
             if dtype and self._match(TokenType.PLACEHOLDER):  # T?
                 dtype.set("nullable", True)
             return dtype
+
+        def _parse_ydb_struct_field(self) -> t.Optional[exp.ColumnDef]:
+            if self._curr and self._curr.token_type == TokenType.GT:
+                return None
+
+            field = self._parse_id_var(any_token=True)
+            if not field:
+                return None
+
+            if not self._match(TokenType.COLON):
+                self.raise_error("Expected colon after struct field name")
+
+            kind = self._parse_types()
+            return self.expression(exp.ColumnDef(this=field, kind=kind))
 
         def _parse_table_alias(self, alias_tokens=None):
             # Prevent YDB-specific keywords from being consumed as table aliases
@@ -1067,6 +1092,30 @@ class YDB(Dialect):
         def ydbatstring_sql(self, expression: YdbAtString) -> str:
             return f"@@{expression.this}@@"
 
+        def maybe_comment(
+            self,
+            sql: str,
+            expression: t.Optional[exp.Expression] = None,
+            comments: t.Optional[t.List[str]] = None,
+            separated: bool = False,
+        ) -> str:
+            comments = (
+                ((expression and expression.comments) if comments is None else comments)
+                if self.comments
+                else None
+            )
+            if not comments:
+                return sql
+
+            line_directives = [comment.strip() for comment in comments if comment.strip().startswith("!")]
+            if not line_directives:
+                return super().maybe_comment(sql, expression, comments=comments, separated=separated)
+
+            remaining_comments = [comment for comment in comments if not comment.strip().startswith("!")]
+            sql = super().maybe_comment(sql, expression, comments=remaining_comments, separated=separated)
+            prefix = "\n".join(f"--{directive}" for directive in line_directives)
+            return f"{prefix}\n{sql}" if sql else prefix
+
         def alias_sql(self, expression: exp.Alias) -> str:
             alias = expression.args.get("alias")
             if alias and alias.name.startswith("$"):
@@ -1226,6 +1275,15 @@ class YDB(Dialect):
                         if isinstance(col, exp.ColumnDef)
                     )
                     sql = f"Tuple<{inner}>"
+                    return f"Optional<{sql}>" if nullable else sql
+
+                if type_value == exp.DataType.Type.STRUCT:
+                    inner = ", ".join(
+                        f"{self.sql(col, 'this')}: {self.sql(col, 'kind')}"
+                        for col in expression.expressions
+                        if isinstance(col, exp.ColumnDef)
+                    )
+                    sql = f"Struct<{inner}>"
                     return f"Optional<{sql}>" if nullable else sql
 
                 inner = ", ".join(self.sql(e) for e in expression.expressions)
