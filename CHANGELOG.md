@@ -1,3 +1,9 @@
+* Fix function variables
+* Lambdas support
+* Fix DECLARE comments and empty statements
+* Structs support
+* Fix group by aliases round trip and other fixes
+
 ## 0.2.2 ##
 * Fix backward compat with older sqlglot versions
 
