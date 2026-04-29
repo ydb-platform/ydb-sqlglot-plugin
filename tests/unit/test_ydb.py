@@ -635,6 +635,18 @@ class TestYDBParser(Validator):
     def test_optional_tuple(self):
         self.validate_identity("CAST(x AS Optional<Tuple<Int32, Utf8>>)")
 
+    def test_struct_type(self):
+        self.validate_identity("DECLARE $x AS Struct<a: Int64, b: Utf8>")
+
+    def test_list_struct_type(self):
+        self.validate_identity("DECLARE $x AS List<Struct<a: Int64, b: Utf8>>")
+
+    def test_struct_type_trailing_comma(self):
+        self.validate_identity(
+            "DECLARE $x AS List<Struct<a: Optional<Utf8>, b: Utf8,>>",
+            write_sql="DECLARE $x AS List<Struct<a: Optional<Utf8>, b: Utf8>>",
+        )
+
     # --- ASSUME ORDER BY ----------------------------------------------------
 
     def test_assume_order_by(self):
@@ -648,6 +660,15 @@ class TestYDBParser(Validator):
 
     def test_regular_order_by_unchanged(self):
         self.validate_identity("SELECT * FROM `t` ORDER BY id")
+
+    def test_line_directive_stays_line_comment(self):
+        self.validate_identity("--!syntax_v1\nSELECT 1")
+        self.validate_identity("--!ansi_lexer\nSELECT 1")
+
+    def test_line_directive_before_pragma(self):
+        self.validate_identity(
+            "--!syntax_v1\nPRAGMA TablePathPrefix = '/db/name'",
+        )
 
     # --- Named expressions $name = expr -------------------------------------
 
