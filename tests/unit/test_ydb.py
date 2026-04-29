@@ -1,6 +1,6 @@
 import unittest
 
-from sqlglot import ErrorLevel, UnsupportedError, parse_one
+from sqlglot import ErrorLevel, UnsupportedError, parse, parse_one
 from sqlglot.parser import logger as parser_logger
 
 from ydb_sqlglot.ydb import eliminate_join_marks, make_db_name_lower, table_names_to_lower_case
@@ -578,6 +578,17 @@ class TestYDBParser(Validator):
     def test_declare_uint64(self):
         self.validate_identity("DECLARE $id AS Uint64")
 
+    def test_declare_trailing_block_comments(self):
+        self.validate_identity(
+            "DECLARE $id AS Uint64 /* GetItem{test} */ /* Page 0 */"
+        )
+
+    def test_declare_trailing_block_comments_roundtrip_stable(self):
+        sql = "DECLARE $id AS Uint64 /* GetItem{test} */ /* Page 0 */"
+        generated = parse_one(sql, dialect="ydb").sql(dialect="ydb")
+        regenerated = parse_one(generated, dialect="ydb").sql(dialect="ydb")
+        self.assertEqual(generated, regenerated)
+
     # --- FLATTEN [LIST|DICT] BY ---------------------------------------------
 
     def test_flatten_by(self):
@@ -677,6 +688,41 @@ class TestYDBParser(Validator):
 
     def test_named_expression_from_table(self):
         self.validate_identity("$t = (SELECT * FROM `table`)")
+
+    def test_named_expression_chain_roundtrip_stable(self):
+        sql = (
+            "$abc_services = SELECT id FROM `table_1`;\n"
+            "$max_sync_time = SELECT MAX(_cq_sync_time) FROM `table_2` WHERE organization_id = $org_id;\n"
+            "$result = SELECT ycmcc.folder_id AS folder_id FROM `table_2` AS ycmcc "
+            "JOIN $abc_services AS ycrc ON ycmcc.cloud_id = ycrc.id "
+            "WHERE ycmcc._cq_sync_time = $max_sync_time;\n"
+            "SELECT * FROM $result"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        regenerated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(generated, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(generated, regenerated)
+
+    def test_named_expression_chain_with_empty_statement_roundtrip_stable(self):
+        sql = "$a = SELECT 1;;\nSELECT * FROM $a"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        regenerated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(generated, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(generated, regenerated)
 
 
 # ---------------------------------------------------------------------------
