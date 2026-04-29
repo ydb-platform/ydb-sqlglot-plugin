@@ -427,6 +427,11 @@ class YdbAtString(exp.Expression):
     arg_types = {"this": True}
 
 
+class YdbLambdaBlock(exp.Expression):
+    """YDB lambda body with local named expressions followed by RETURN."""
+    arg_types = {"this": True, "expressions": False}
+
+
 # Container types that use Generic<T, ...> syntax in YDB
 _YDB_GENERIC_TYPES = {
     "List": exp.DataType.Type.LIST,
@@ -478,6 +483,10 @@ def _reassemble_ctes(
             # Unwrap Subquery — CTE.this must be Select, not Subquery
             if isinstance(inner, exp.Subquery):
                 inner = inner.this
+            if not isinstance(inner, exp.Query):
+                _flush_as_aliases()
+                result.append(stmt)
+                continue
             # Replace any $prev_cte refs inside this CTE body
             inner = _replace_param_table_refs(inner, pending_names)
             pending_aliases.append(stmt)
@@ -591,6 +600,11 @@ class YDB(Dialect):
             ),
         }
 
+        LAMBDAS = {
+            **parser.Parser.LAMBDAS,
+            TokenType.ARROW: lambda self, expressions: self._parse_ydb_lambda(expressions),
+        }
+
         STATEMENT_PARSERS = {
             **parser.Parser.STATEMENT_PARSERS,
             TokenType.DECLARE: lambda self: self._parse_ydb_declare(),
@@ -598,8 +612,56 @@ class YDB(Dialect):
         }
 
         def parse(self, raw_tokens, sql=None):
-            statements = super().parse(raw_tokens, sql)
+            self.reset()
+            self.sql = sql or ""
+
+            chunks: t.List[t.List[tokens.Token]] = [[]]
+            brace_depth = 0
+            total = len(raw_tokens)
+
+            for i, token in enumerate(raw_tokens):
+                if token.token_type == TokenType.L_BRACE:
+                    brace_depth += 1
+                elif token.token_type == TokenType.R_BRACE and brace_depth:
+                    brace_depth -= 1
+
+                if token.token_type == TokenType.SEMICOLON and not brace_depth:
+                    if token.comments:
+                        chunks.append([token])
+                    if i < total - 1:
+                        chunks.append([])
+                else:
+                    chunks[-1].append(token)
+
+            self._chunks = chunks
+            statements = self._parse_ydb_chunks(self.__class__._parse_statement, chunks)
             return _reassemble_ctes(statements)
+
+        def _parse_ydb_chunks(self, parse_method, chunks):
+            expressions = []
+
+            # sqlglot >= 29 has this helper; 28.x only exposes the lower-level
+            # parser state, so keep a local fallback for the supported range.
+            if hasattr(self, "_parse_batch_statements"):
+                return self._parse_batch_statements(
+                    parse_method=parse_method,
+                    sep_first_statement=False,
+                )
+
+            for chunk in chunks:
+                self._index = -1
+                self._tokens = chunk
+                self._tokens_size = len(chunk)
+                self._advance()
+
+                expressions.append(parse_method(self))
+
+                if self._index < len(self._tokens):
+                    self.raise_error("Invalid expression / Unexpected token")
+
+                self.check_errors()
+
+            return expressions
 
         def expression(self, exp_class_or_instance, token=None, comments=None, **kwargs):
             """Bridge sqlglot's two `Parser.expression()` calling conventions.
@@ -652,6 +714,22 @@ class YDB(Dialect):
                     alias=exp.Identifier(this=f"${name_var.name}"),
                 )
             )
+
+        def _parse_lambda_arg(self) -> t.Optional[exp.Expression]:
+            if self._match(TokenType.PARAMETER):
+                name = self._parse_var(any_token=True)
+                if not name:
+                    return None
+
+                parameter = exp.Parameter(this=name)
+                if self._match(TokenType.PLACEHOLDER):
+                    parameter.meta["optional"] = True
+                return self.expression(parameter)
+
+            arg = super()._parse_lambda_arg()
+            if arg and self._match(TokenType.PLACEHOLDER):
+                arg.meta["optional"] = True
+            return arg
 
         def _parse_ydb_declare(self) -> exp.Declare:
             items = self._parse_csv(self._parse_ydb_declareitem)
@@ -890,6 +968,12 @@ class YDB(Dialect):
 
             if self._match(TokenType.L_PAREN):
                 comments = self._prev_comments
+                if self._next_matching_rparen_is_arrow():
+                    expressions = self._parse_csv(self._parse_lambda_arg)
+                    self._match_r_paren()
+                    self._match(TokenType.ARROW)
+                    return self._parse_ydb_lambda(expressions)
+
                 query = self._parse_select()
 
                 if query:
@@ -923,6 +1007,22 @@ class YDB(Dialect):
                 return this
             return super()._parse_primary()
 
+        def _next_matching_rparen_is_arrow(self) -> bool:
+            depth = 1
+            # _tokens_size is not available in all supported sqlglot versions.
+            for i in range(self._index, len(self._tokens)):
+                token = self._tokens[i]
+                if token.token_type == TokenType.L_PAREN:
+                    depth += 1
+                elif token.token_type == TokenType.R_PAREN:
+                    depth -= 1
+                    if depth == 0:
+                        return (
+                            i + 1 < len(self._tokens)
+                            and self._tokens[i + 1].token_type == TokenType.ARROW
+                        )
+            return False
+
         def _parse_at_raw_string(self) -> YdbAtString:
             self._advance()
             self._advance()
@@ -953,17 +1053,42 @@ class YDB(Dialect):
                 return None
             self._advance()
             self._advance()
-            self._match(TokenType.L_PAREN)
+            return self._parse_ydb_lambda(params)
 
-            if not (self._curr.text == "RETURN"):
-                self.raise_error("Expected lambda body expression after '->'")
-            self._advance()
-            body = self._parse_conjunction()
+        def _parse_ydb_lambda(self, params):
+            has_brace = self._match(TokenType.L_BRACE)
+            assignments = []
+
+            if has_brace:
+                while self._curr and self._curr.text != "RETURN":
+                    assignment = self._parse_ydb_named_expr()
+                    if not assignment:
+                        self.raise_error("Expected lambda body expression after '->'")
+                    assignments.append(assignment)
+                    self._match(TokenType.SEMICOLON)
+
+                if not self._match_text_seq("RETURN"):
+                    self.raise_error("Expected lambda body RETURN after '->'")
+
+            body = self._parse_disjunction()
+
             if not body:
                 self.raise_error("Expected lambda body expression after '->'")
 
-            self._match(TokenType.R_BRACE)
-            return exp.Lambda(this=body, expressions=params)
+            self._match(TokenType.SEMICOLON)
+            if has_brace:
+                self._match(TokenType.R_BRACE, expression=body)
+                if assignments:
+                    body = self.expression(YdbLambdaBlock(this=body, expressions=assignments))
+
+            return self.expression(exp.Lambda(this=body, expressions=params))
+
+        def _parse_in(self, this: t.Optional[exp.Expression], alias: bool = False) -> exp.In:
+            if self._match_text_seq("COMPACT"):
+                expression = self.expression(exp.In(this=this, field=self._parse_column()))
+                expression.meta["compact"] = True
+                return expression
+            return super()._parse_in(this, alias=alias)
 
     class Generator(generator.Generator):
         """
@@ -1113,6 +1238,16 @@ class YDB(Dialect):
 
         def ydbatstring_sql(self, expression: YdbAtString) -> str:
             return f"@@{expression.this}@@"
+
+        def ydblambdablock_sql(self, expression: YdbLambdaBlock) -> str:
+            assignments = [self.sql(assignment) for assignment in expression.expressions]
+            statements = [*assignments, f"RETURN {self.sql(expression, 'this')}"]
+            return "{ " + "; ".join(statements) + " }"
+
+        def in_sql(self, expression: exp.In) -> str:
+            if expression.meta.get("compact"):
+                return f"{self.sql(expression, 'this')} IN COMPACT {self.sql(expression, 'field')}"
+            return super().in_sql(expression)
 
         def maybe_comment(
             self,
@@ -2259,14 +2394,30 @@ class YDB(Dialect):
             Returns:
                 YDB-specific SQL for lambda functions
             """
-            for ident in expression.find_all(exp.Identifier):
-                new_ident = exp.to_identifier("$" + ident.alias_or_name)
-                new_ident.set("quoted", False)
-                ident.replace(new_ident)
+            def _arg_name(arg: exp.Expression) -> str:
+                if isinstance(arg, exp.Parameter):
+                    return arg.name
+                return arg.name if hasattr(arg, "name") else self.sql(arg).lstrip("$")
 
-            args = self.expressions(expression, flat=True)
-            args = f"({args})" if len(args.split(",")) > 1 else args
-            return f"({args}) {arrow_sep} {{RETURN {self.sql(expression, 'this')}}}"
+            def _arg_sql(arg: exp.Expression) -> str:
+                name = _arg_name(arg)
+                sql = f"${name}" if name and not name.startswith("$") else self.sql(arg)
+                return f"{sql}?" if arg.meta.get("optional") else sql
+
+            def _prefix_lambda_refs(node: exp.Expression) -> exp.Expression:
+                if (
+                    isinstance(node, exp.Identifier)
+                    and not node.name.startswith("$")
+                ):
+                    return exp.Identifier(this=f"${node.name}", quoted=False)
+                return node
+
+            args = ", ".join(_arg_sql(arg) for arg in expression.expressions)
+            body = expression.this.copy().transform(_prefix_lambda_refs)
+            if isinstance(body, YdbLambdaBlock):
+                return f"({args}) {arrow_sep} {self.sql(body)}"
+            body_sql = self.sql(body)
+            return f"({args}) {arrow_sep} {body_sql if isinstance(body, exp.Paren) else f'({body_sql})'}"
 
         def _is_simple_expression(self, expr: exp.Expression) -> bool:
             """
@@ -2888,6 +3039,7 @@ class YDB(Dialect):
             AssumeOrderBy: lambda self, e: self.assumeorderby_sql(e),
             YdbTuple: lambda self, e: self.ydbtuple_sql(e),
             YdbAtString: lambda self, e: self.ydbatstring_sql(e),
+            YdbLambdaBlock: lambda self, e: self.ydblambdablock_sql(e),
             exp.Create: create_sql,
             exp.DefaultColumnConstraint: lambda self, e: "",
             exp.DateTrunc: _date_trunc_sql,

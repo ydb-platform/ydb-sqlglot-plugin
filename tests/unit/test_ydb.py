@@ -317,7 +317,13 @@ class TestYDBTransforms(Validator):
     def test_array_any(self):
         self.assertEqual(
             ydb("SELECT * FROM TABLE WHERE ARRAY_ANY(arr, x -> x)"),
-            "SELECT * FROM `TABLE` WHERE ListHasItems(ListFilter(($x) -> {RETURN $x}))",
+            "SELECT * FROM `TABLE` WHERE ListHasItems(ListFilter(($x) -> ($x)))",
+        )
+
+    def test_duckdb_list_filter_lambda_to_ydb(self):
+        self.assertEqual(
+            ydb("SELECT list_filter(arr, x -> x > 0) FROM t", read="duckdb"),
+            "SELECT ListFilter(arr, ($x) -> ($x > 0)) FROM `t`",
         )
 
     def test_nested_nullif_coalesce(self):
@@ -447,7 +453,7 @@ class TestYDBTransforms(Validator):
             ydb(sql),
             "SELECT * FROM `x` LEFT JOIN "
             "(SELECT y.a AS a, y.b AS _u_1 FROM `y` WHERE TRUE GROUP BY b AS b) AS _u_0 "
-            "ON x.b = _u_0._u_1 WHERE ListHasItems(($_x, $p_0)->(ListFilter($_x, ($_x) -> {RETURN $_x = $p_0}))(a, x.a))",
+            "ON x.b = _u_0._u_1 WHERE ListHasItems(($_x, $p_0)->(ListFilter($_x, ($_x) -> ($_x = $p_0)))(a, x.a))",
         )
 
     def test_unnest_scalar_subquery(self):
@@ -466,7 +472,7 @@ class TestYDBTransforms(Validator):
             "SELECT * FROM `x` LEFT JOIN "
             "(SELECT y.a AS a, y.b AS _u_1 FROM `y` WHERE TRUE GROUP BY b AS b) AS _u_0 "
             "ON x.b = _u_0._u_1 "
-            "WHERE x.a > ListHasItems(($_x, $p_0)->(ListFilter($_x, ($_x) -> {RETURN $p_0 > $_x}))(a, x.a))",
+            "WHERE x.a > ListHasItems(($_x, $p_0)->(ListFilter($_x, ($_x) -> ($p_0 > $_x)))(a, x.a))",
         )
 
     def test_unnest_aggregate_subquery(self):
@@ -671,6 +677,48 @@ class TestYDBParser(Validator):
 
     def test_regular_order_by_unchanged(self):
         self.validate_identity("SELECT * FROM `t` ORDER BY id")
+
+    # --- Lambda expressions -------------------------------------------------
+
+    def test_lambda_return_body_with_semicolon(self):
+        self.validate_identity(
+            "ListFilter($counterIds, ($x) -> {RETURN $x > $startCounterId;})",
+            write_sql="ListFilter($counterIds, ($x) -> ($x > $startCounterId))",
+        )
+
+    def test_in_compact_parameter(self):
+        self.validate_identity(
+            "SELECT CounterID FROM `counter_stat` WHERE CounterID IN COMPACT $ids"
+        )
+
+    def test_lambda_parenthesized_body(self):
+        self.validate_identity(
+            "($x, $y?) -> ($x + ($y ?? 0))",
+            write_sql="($x, $y?) -> ($x + (COALESCE($y, 0)))",
+        )
+
+    def test_lambda_block_with_named_expression(self):
+        self.validate_identity(
+            '($y) -> { $prefix = "x"; RETURN $prefix || $y; }',
+            write_sql="($y) -> { $prefix = 'x'; RETURN $prefix || $y }",
+        )
+
+    def test_lambda_named_expression_with_in_compact_roundtrip_stable(self):
+        sql = (
+            "$ids = ListFilter($counterIds, ($x) -> {RETURN $x > $startCounterId;});\n"
+            "SELECT CounterID FROM `counter_stat` WHERE CounterID IN COMPACT $ids"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        regenerated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(generated, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(generated, regenerated)
 
     def test_line_directive_stays_line_comment(self):
         self.validate_identity("--!syntax_v1\nSELECT 1")
