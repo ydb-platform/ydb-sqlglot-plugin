@@ -465,6 +465,9 @@ def _reassemble_ctes(
         pending_names.clear()
 
     for stmt in statements:
+        if stmt is None:
+            continue
+
         if (
             isinstance(stmt, exp.Alias)
             and isinstance(stmt.args.get("alias"), exp.Identifier)
@@ -652,7 +655,22 @@ class YDB(Dialect):
 
         def _parse_ydb_declare(self) -> exp.Declare:
             items = self._parse_csv(self._parse_ydb_declareitem)
-            return self.expression(exp.Declare(expressions=items))
+            declare = self.expression(exp.Declare(expressions=items))
+
+            item_comments = {
+                comment
+                for item in items
+                if item is not None
+                for comment in (item.comments or [])
+            }
+            if item_comments and declare.comments:
+                declare.comments = [
+                    comment
+                    for comment in declare.comments
+                    if comment.strip().startswith("!") or comment not in item_comments
+                ]
+
+            return declare
 
         def _parse_ydb_declareitem(self) -> t.Optional[exp.DeclareItem]:
             if not self._match(TokenType.PARAMETER):
@@ -662,7 +680,11 @@ class YDB(Dialect):
                 return None
             self._match(TokenType.ALIAS)
             kind = self._parse_types()
-            return self.expression(exp.DeclareItem(this=name, kind=kind))
+            comments = self._prev.comments if self._prev else None
+            return self.expression(
+                exp.DeclareItem(this=name, kind=kind),
+                comments=comments,
+            )
 
         def _parse_types(self, *args, **kwargs) -> t.Optional[exp.Expression]:
             # YDB generic types use Name<...> syntax; token type varies by keyword status
