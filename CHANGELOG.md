@@ -1,3 +1,4 @@
+## 0.2.3 ##
 * Fix function variables
 * Lambdas support
 * Fix DECLARE comments and empty statements

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ydb-sqlglot-plugin"
-version = "0.2.2"  # AUTOVERSION
+version = "0.2.3"  # AUTOVERSION
 description = "YDB dialect plugin for sqlglot"
 readme = "README.md"
 license = {text = "Apache-2.0"}
