@@ -98,11 +98,11 @@ def _alias_order_by_aggregates(expression: exp.Expression) -> None:
             ob_expr = ordered.this
             if not isinstance(ob_expr, exp.AggFunc):
                 continue
-            ob_sql = ob_expr.sql()
+            ob_sql = ob_expr.sql(dialect="ydb")
             # find matching SELECT expression
             for sel_expr in select.expressions:
                 candidate = sel_expr.this if isinstance(sel_expr, exp.Alias) else sel_expr
-                if candidate.sql() == ob_sql:
+                if candidate.sql(dialect="ydb") == ob_sql:
                     if isinstance(sel_expr, exp.Alias):
                         alias_name = sel_expr.alias
                     else:
@@ -194,17 +194,17 @@ def _wrap_udf_group_by(expression: exp.Expression) -> None:
         resolved_group: list[exp.Expression] = [_effective(g) for g in group.expressions]
 
         # For each non-trivial resolved GROUP BY expression, find or assign an alias.
-        gb_alias: dict[str, str] = {}  # effective_expr.sql() → alias_name
+        gb_alias: dict[str, str] = {}  # effective_expr.sql(dialect="ydb") -> alias_name
         new_sel_exprs = list(select.expressions)
 
         for eff in resolved_group:
             if _is_trivial(eff):
                 continue
-            eff_sql = eff.sql()
+            eff_sql = eff.sql(dialect="ydb")
             # Find an existing SELECT alias for this expression.
             found = next(
                 (sel.alias for sel in select.expressions
-                 if isinstance(sel, exp.Alias) and sel.this.sql() == eff_sql),
+                 if isinstance(sel, exp.Alias) and sel.this.sql(dialect="ydb") == eff_sql),
                 None,
             )
             if found:
@@ -269,7 +269,7 @@ def _wrap_udf_group_by(expression: exp.Expression) -> None:
             elif _is_trivial(eff):
                 new_group_exprs.append(eff.copy())
             else:
-                new_group_exprs.append(exp.column(gb_alias[eff.sql()]))
+                new_group_exprs.append(exp.column(gb_alias[eff.sql(dialect="ydb")]))
 
         # Outer SELECT expressions: replace non-trivial expressions with alias columns,
         # keep aggregates as-is.
@@ -826,7 +826,11 @@ class YDB(Dialect):
             if not name:
                 return None
             self._match(TokenType.ALIAS)
-            kind = self._parse_types()
+            if self._curr and self._curr.token_type == TokenType.STRING:
+                kind = exp.Var(this=f'"{self._curr.text}"')
+                self._advance()
+            else:
+                kind = self._parse_types()
             comments = self._prev.comments if self._prev else None
             return self.expression(
                 exp.DeclareItem(this=name, kind=kind),
@@ -1215,7 +1219,10 @@ class YDB(Dialect):
             return super()._parse_table_alias(alias_tokens=alias_tokens)
 
         def _parse_table_hints(self) -> t.Optional[t.List[exp.Expression]]:
-            if self._curr and self._next and self._curr.token_type == TokenType.WITH and self._next.token_type == TokenType.L_PAREN:
+            if not (self._curr and self._curr.token_type == TokenType.WITH):
+                return super()._parse_table_hints()
+
+            if self._next and self._next.token_type == TokenType.L_PAREN:
                 start = self._curr.start
                 end = self._next.end
                 self._advance()
@@ -1233,7 +1240,31 @@ class YDB(Dialect):
                     return [exp.Var(this=self.sql[start:end + 1])]
                 return None
 
-            return super()._parse_table_hints()
+            start = self._curr.start
+            end = self._curr.end
+            self._advance()
+            stop_tokens = {
+                TokenType.WHERE,
+                TokenType.GROUP_BY,
+                TokenType.HAVING,
+                TokenType.ORDER_BY,
+                TokenType.LIMIT,
+                TokenType.ON,
+                TokenType.USING,
+                TokenType.JOIN,
+                TokenType.LEFT,
+                TokenType.RIGHT,
+                TokenType.FULL,
+                TokenType.CROSS,
+                TokenType.INNER,
+            }
+            while self._curr and self._curr.token_type not in stop_tokens:
+                end = self._curr.end
+                self._advance()
+
+            if start is not None and end is not None:
+                return [exp.Var(this=self.sql[start:end + 1])]
+            return None
 
         def _parse_query_modifiers(self, this):
             if (
