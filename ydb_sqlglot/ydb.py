@@ -408,8 +408,13 @@ def _apply_subquery_alias_columns(expression: exp.Expression) -> None:
 
 
 class FlattenBy(exp.Expression):
-    """YDB-specific FLATTEN [LIST|DICT] BY clause on a table reference."""
-    arg_types = {"this": True, "expressions": True, "kind": False}
+    """YDB-specific FLATTEN [LIST|DICT|OPTIONAL] BY clause on a table reference."""
+    arg_types = {"this": True, "expressions": True, "kind": False, "grouped": False}
+
+
+class FlattenColumns(exp.Expression):
+    """YDB-specific FLATTEN COLUMNS clause on a table reference."""
+    arg_types = {"this": True}
 
 
 class AssumeOrderBy(exp.Expression):
@@ -664,7 +669,13 @@ class YDB(Dialect):
 
         PRIMARY_PARSERS = {
             **parser.Parser.PRIMARY_PARSERS,
+            TokenType.NUMBER: lambda self, token: self._parse_ydb_number(token),
             TokenType.STRING: lambda self, token: self._parse_ydb_string(token),
+        }
+
+        NUMERIC_PARSERS = {
+            **parser.Parser.NUMERIC_PARSERS,
+            TokenType.NUMBER: lambda self, token: self._parse_ydb_number(token),
         }
 
         def parse(self, raw_tokens, sql=None):
@@ -763,7 +774,9 @@ class YDB(Dialect):
                 # Not an assignment — retreat (including '$') and parse as expression.
                 self._retreat(index)
                 return self._parse_expression()
-            value = self._parse_select() or self._parse_expression()
+            value = self._merge_ydb_number_suffix(
+                self._parse_select() or self._parse_expression()
+            )
             return self.expression(
                 exp.Alias(
                     this=value,
@@ -831,6 +844,85 @@ class YDB(Dialect):
                 literal.meta["ydb_string_suffix"] = self._curr.text
                 self._advance()
             return literal
+
+        def _parse_ydb_number(self, token: tokens.Token) -> exp.Literal:
+            text = token.text
+            if (
+                text == "0"
+                and self._curr
+                and self._curr.token_type == TokenType.VAR
+                and self._curr.text.lower().startswith("x")
+                and token.end + 1 == self._curr.start
+            ):
+                text += self._curr.text
+                self._advance()
+            elif (
+                self._curr
+                and self._curr.token_type == TokenType.VAR
+                and self._curr.text.lower() in ("u", "l", "ul", "lu")
+                and token.end + 1 == self._curr.start
+            ):
+                text += self._curr.text
+                self._advance()
+
+            return self.expression(exp.Literal(this=text, is_string=False), token)
+
+        def _merge_ydb_number_suffix(self, expression: t.Optional[exp.Expression]) -> t.Optional[exp.Expression]:
+            if isinstance(expression, exp.Alias) and isinstance(expression.alias, str):
+                alias = expression.args.get("alias")
+                inner = expression.this
+                literal = inner.expression if isinstance(inner, exp.Binary) else inner
+                lower_suffix = expression.alias.lower()
+                if (
+                    isinstance(literal, exp.Literal)
+                    and not literal.is_string
+                    and lower_suffix in ("u", "l", "ul", "lu")
+                    and literal.meta.get("end") is not None
+                    and alias
+                    and alias.meta.get("start") is not None
+                    and literal.meta["end"] + 1 == alias.meta["start"]
+                ):
+                    literal.set("this", f"{literal.this}{expression.alias}")
+                    return inner
+
+            if not (
+                expression
+                and self._curr
+                and self._curr.token_type == TokenType.VAR
+            ):
+                return expression
+
+            suffix = self._curr.text
+            lower_suffix = suffix.lower()
+            literal = expression
+            if isinstance(expression, exp.Binary):
+                literal = expression.expression
+
+            if not (
+                isinstance(literal, exp.Literal)
+                and not literal.is_string
+                and (
+                    (literal.this == "0" and lower_suffix.startswith("x"))
+                    or lower_suffix in ("u", "l", "ul", "lu")
+                )
+                and literal.meta.get("end") is not None
+                and literal.meta["end"] + 1 == self._curr.start
+            ):
+                return expression
+
+            literal.set("this", f"{literal.this}{suffix}")
+            self._advance()
+            return expression
+
+        def _parse_alias(
+            self,
+            this: t.Optional[exp.Expression],
+            explicit: bool = False,
+        ) -> t.Optional[exp.Expression]:
+            return super()._parse_alias(
+                self._merge_ydb_number_suffix(this),
+                explicit=explicit,
+            )
 
         def _parse_ydb_json_value(self) -> YdbJsonValue:
             this = self._parse_bitwise()
@@ -1115,12 +1207,33 @@ class YDB(Dialect):
             if self._curr and self._curr.text.upper() in ("FLATTEN", "ASSUME", "VIEW"):
                 # Also check that what follows is a YDB construct, not a regular alias
                 if self._next and (
-                    self._next.text.upper() in ("BY", "LIST", "DICT")
+                    self._next.text.upper() in ("BY", "LIST", "DICT", "OPTIONAL", "COLUMNS")
                     or self._next.token_type == TokenType.ORDER_BY
                     or self._curr.text.upper() == "VIEW"
                 ):
                     return None
             return super()._parse_table_alias(alias_tokens=alias_tokens)
+
+        def _parse_table_hints(self) -> t.Optional[t.List[exp.Expression]]:
+            if self._curr and self._next and self._curr.token_type == TokenType.WITH and self._next.token_type == TokenType.L_PAREN:
+                start = self._curr.start
+                end = self._next.end
+                self._advance()
+                self._advance()
+                depth = 1
+                while self._curr and depth:
+                    end = self._curr.end
+                    if self._curr.token_type == TokenType.L_PAREN:
+                        depth += 1
+                    elif self._curr.token_type == TokenType.R_PAREN:
+                        depth -= 1
+                    self._advance()
+
+                if start is not None and end is not None:
+                    return [exp.Var(this=self.sql[start:end + 1])]
+                return None
+
+            return super()._parse_table_hints()
 
         def _parse_query_modifiers(self, this):
             if (
@@ -1199,15 +1312,42 @@ class YDB(Dialect):
             if table and self._match(TokenType.VIEW):
                 table.set("ydb_index_view", self._parse_id_var(any_token=True))
                 table.set("alias", self._parse_table_alias())
+            if table and self._curr and self._curr.token_type == TokenType.WITH and self._next and self._next.token_type == TokenType.L_PAREN:
+                self._advance()
+                self._advance()
+                depth = 1
+                while self._curr and depth:
+                    if self._match(TokenType.L_PAREN):
+                        depth += 1
+                    elif self._match(TokenType.R_PAREN):
+                        depth -= 1
+                    else:
+                        self._advance()
             if table and self._curr and self._curr.text.upper() == "FLATTEN":
                 self._advance()
+                if self._curr and self._curr.text.upper() == "COLUMNS":
+                    self._advance()
+                    return self.expression(FlattenColumns(this=table))
+
                 kind: t.Optional[str] = None
-                if self._curr and self._curr.text.upper() in ("LIST", "DICT"):
+                if self._curr and self._curr.text.upper() in ("LIST", "DICT", "OPTIONAL"):
                     kind = self._curr.text.upper()
                     self._advance()
-                self._match_text_seq("BY")
-                cols = self._parse_csv(self._parse_column)
-                return self.expression(FlattenBy(this=table, expressions=cols, kind=kind))
+                if not self._match_text_seq("BY"):
+                    self.raise_error("Expected BY after FLATTEN")
+
+                grouped = self._match(TokenType.L_PAREN)
+
+                def _parse_flatten_expr() -> t.Optional[exp.Expression]:
+                    return self._parse_alias(self._parse_disjunction(), explicit=True)
+
+                cols = self._parse_csv(_parse_flatten_expr)
+                if grouped:
+                    self._match_r_paren()
+
+                return self.expression(
+                    FlattenBy(this=table, expressions=cols, kind=kind, grouped=grouped)
+                )
             return table
 
         def _parse_struct_types(self, type_required=True) -> t.Optional[exp.Expression]:
@@ -1235,6 +1375,23 @@ class YDB(Dialect):
                 and self._next.token_type == TokenType.PARAMETER
             ):
                 return self._parse_at_raw_string()
+
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.PARAMETER
+                and self._next
+                and self._next.token_type == TokenType.VAR
+                and self._index + 2 < len(self._tokens)
+                and self._tokens[self._index + 2].token_type == TokenType.L_PAREN
+            ):
+                self._advance()
+                name = self._parse_var(any_token=True)
+                self._match(TokenType.L_PAREN)
+                args = self._parse_csv(self._parse_assignment)
+                self._match_r_paren()
+                return self.expression(
+                    exp.Anonymous(this=f"${name.name}", expressions=args)
+                )
 
             if self._match(TokenType.L_PAREN):
                 comments = self._prev_comments
@@ -1331,16 +1488,21 @@ class YDB(Dialect):
 
             if has_brace:
                 while self._curr and self._curr.text != "RETURN":
+                    index = self._index
+                    if self._curr.token_type != TokenType.PARAMETER:
+                        self.raise_error("Expected lambda body assignment or RETURN after '->'")
                     assignment = self._parse_ydb_named_expr()
                     if not assignment:
                         self.raise_error("Expected lambda body expression after '->'")
                     assignments.append(assignment)
                     self._match(TokenType.SEMICOLON)
+                    if self._index <= index:
+                        self.raise_error("Expected lambda body parser to consume input")
 
                 if not self._match_text_seq("RETURN"):
                     self.raise_error("Expected lambda body RETURN after '->'")
 
-            body = self._parse_disjunction()
+            body = self._merge_ydb_number_suffix(self._parse_disjunction())
 
             if not body:
                 self.raise_error("Expected lambda body expression after '->'")
@@ -1462,7 +1624,13 @@ class YDB(Dialect):
             if ydb_index_view:
                 sql += f" VIEW {ydb_index_view}"
 
-            if expression.alias:
+            hints = expression.args.get("hints") or []
+            if hints and isinstance(hints[0], exp.Var) and hints[0].this.startswith("WITH"):
+                sql += f" {hints[0].this}"
+
+            if expression.alias and ydb_index_view:
+                sql += f" {expression.alias}"
+            elif expression.alias:
                 sql += f" AS {expression.alias}"
 
             return sql
@@ -1505,7 +1673,13 @@ class YDB(Dialect):
             kind = expression.args.get("kind")
             kind_str = f" {kind}" if kind else ""
             cols = self.expressions(expression, flat=True)
+            if expression.args.get("grouped"):
+                cols = f"({cols})"
             return f"{table} FLATTEN{kind_str} BY {cols}"
+
+        def flattencolumns_sql(self, expression: FlattenColumns) -> str:
+            table = self.sql(expression, "this")
+            return f"{table} FLATTEN COLUMNS"
 
         def assumeorderby_sql(self, expression: AssumeOrderBy) -> str:
             order = self.sql(expression, "this").lstrip()
@@ -1598,7 +1772,15 @@ class YDB(Dialect):
             return f"{self.sql(expression, 'this')} AS {alias}"
 
         def ydblambdablock_sql(self, expression: YdbLambdaBlock) -> str:
-            assignments = [self.sql(assignment) for assignment in expression.expressions]
+            assignments = []
+            for assignment in expression.expressions:
+                if isinstance(assignment, exp.Alias) and isinstance(assignment.this, exp.Lambda):
+                    assignments.append(
+                        f"{self.sql(assignment, 'alias')} = "
+                        f"{self._lambda(assignment.this, force_block=True)}"
+                    )
+                else:
+                    assignments.append(self.sql(assignment))
             statements = [*assignments, f"RETURN {self.sql(expression, 'this')}"]
             return "{ " + "; ".join(statements) + " }"
 
@@ -2132,7 +2314,7 @@ class YDB(Dialect):
                                 f"decorrelated in YDB — rewrite manually using a $variable subquery"
                             )
                     continue
-                if scope.external_columns and scope.scope_type != ScopeType.CTE:
+                if scope.external_columns and scope.scope_type not in (ScopeType.CTE, ScopeType.DERIVED_TABLE):
                     self.decorrelate(select, parent, scope.external_columns, next_alias_name)
                 if scope.scope_type == ScopeType.SUBQUERY:
                     self.unnest(select, parent, next_alias_name)
@@ -2750,7 +2932,12 @@ class YDB(Dialect):
             self.unsupported(f"Unexpected EXTRACT unit: {unit}")
             return self.func("DATE", expr)
 
-        def _lambda(self, expression: exp.Lambda, arrow_sep: str = "->") -> str:
+        def _lambda(
+            self,
+            expression: exp.Lambda,
+            arrow_sep: str = "->",
+            force_block: bool = False,
+        ) -> str:
             """
             Generate SQL for Lambda expressions with YDB-specific syntax.
 
@@ -2784,6 +2971,8 @@ class YDB(Dialect):
             if isinstance(body, YdbLambdaBlock):
                 return f"({args}) {arrow_sep} {self.sql(body)}"
             body_sql = self.sql(body)
+            if force_block:
+                return f"({args}) {arrow_sep} {{ RETURN {body_sql} }}"
             return f"({args}) {arrow_sep} {body_sql if isinstance(body, exp.Paren) else f'({body_sql})'}"
 
         def _is_simple_expression(self, expr: exp.Expression) -> bool:
@@ -2902,6 +3091,16 @@ class YDB(Dialect):
             on_condition = expression.args.get("on")
             using = expression.args.get("using")
 
+            flatten = self._flatten_by_from_array_join(expression)
+            if flatten:
+                return flatten
+            if (expression.args.get("kind") or "").upper() == "ARRAY":
+                raise UnsupportedError("Only single-column ClickHouse ARRAY JOIN can be converted to YDB FLATTEN BY")
+
+            flatten = self._flatten_by_from_unnest_join(expression)
+            if flatten:
+                return flatten
+
             # Any join with no ON/USING clause becomes an explicit CROSS JOIN.
             # YDB requires an ON clause for outer joins, and emitting CROSS JOIN
             # explicitly (instead of the comma-separated form) keeps the output
@@ -2931,10 +3130,17 @@ class YDB(Dialect):
                 non_equality_conditions: list[Expression] = []
                 equality_conditions: list[Expression] = []
 
-                if isinstance(on_condition, exp.And):
-                    conditions = list(on_condition.flatten())
-                else:
-                    conditions = [on_condition]
+                def _flatten_join_conditions(condition: exp.Expression) -> t.List[exp.Expression]:
+                    if isinstance(condition, exp.Paren):
+                        return _flatten_join_conditions(condition.this)
+                    if isinstance(condition, exp.And):
+                        conditions = []
+                        for part in condition.flatten():
+                            conditions.extend(_flatten_join_conditions(part))
+                        return conditions
+                    return [condition]
+
+                conditions = _flatten_join_conditions(on_condition)
 
                 for cond in conditions:
                     # Check if it's an equality predicate
@@ -3001,6 +3207,93 @@ class YDB(Dialect):
 
             return super().join_sql(expression)
 
+        def _flatten_by_from_array_join(self, expression: exp.Join) -> str:
+            if (expression.args.get("kind") or "").upper() != "ARRAY":
+                return ""
+            if expression.args.get("side"):
+                return ""
+            if expression.args.get("on") or expression.args.get("using"):
+                return ""
+
+            flatten_expr = expression.this
+            if not flatten_expr or expression.expressions:
+                return ""
+            if not flatten_expr.find(exp.Column):
+                return ""
+
+            return f" FLATTEN BY {self.sql(flatten_expr)}"
+
+        def _flatten_by_from_unnest_join(self, expression: exp.Join) -> str:
+            if expression.args.get("on") or expression.args.get("using"):
+                return ""
+
+            source = expression.this
+            alias = None
+            if isinstance(source, exp.Lateral):
+                alias = source.args.get("alias")
+                source = source.this
+
+            if not isinstance(source, exp.Unnest) or len(source.expressions) != 1:
+                return ""
+
+            alias = alias or source.args.get("alias")
+            flatten_expr = source.expressions[0].copy()
+            if not flatten_expr.find(exp.Column):
+                return ""
+
+            output_name = None
+            if isinstance(alias, exp.TableAlias):
+                output_name = seq_get(alias.columns, 0)
+                output_name = output_name.name if output_name else alias.name
+
+            if output_name:
+                flatten_expr = exp.alias_(flatten_expr, output_name)
+
+            return f" FLATTEN BY {self.sql(flatten_expr)}"
+
+        def _select_with_array_join_projection(self, expression: exp.Select) -> exp.Select:
+            from_ = expression.args.get("from_")
+            if not from_ or not from_.this:
+                return expression
+
+            explode_alias = None
+            for select_expr in expression.expressions:
+                candidate = select_expr.this if isinstance(select_expr, exp.Alias) else select_expr
+                if isinstance(candidate, exp.Explode):
+                    explode_alias = select_expr
+                    break
+
+            if not explode_alias:
+                return expression
+
+            explode = explode_alias.this if isinstance(explode_alias, exp.Alias) else explode_alias
+            flatten_expr = explode.this
+            if not flatten_expr or not flatten_expr.find(exp.Column):
+                return expression
+
+            expression = expression.copy()
+            from_ = expression.args["from_"]
+
+            select_exprs = []
+            output_name = explode_alias.alias_or_name if isinstance(explode_alias, exp.Alias) else flatten_expr.name
+            for select_expr in expression.expressions:
+                candidate = select_expr.this if isinstance(select_expr, exp.Alias) else select_expr
+                if isinstance(candidate, exp.Explode):
+                    select_exprs.append(exp.column(output_name))
+                else:
+                    select_exprs.append(select_expr)
+            expression.set("expressions", select_exprs)
+
+            flatten_expr = flatten_expr.copy()
+            if output_name and output_name != flatten_expr.name:
+                flatten_expr = exp.alias_(flatten_expr, output_name)
+
+            from_.set(
+                "this",
+                FlattenBy(this=from_.this, expressions=[flatten_expr]),
+            )
+            return expression
+
         def update_sql(self, expression: exp.Update) -> str:
             table = expression.args.get("this")
             alias_node = table.args.get("alias") if table else None
@@ -3028,6 +3321,8 @@ class YDB(Dialect):
             return super().update_sql(expression)
 
         def select_sql(self, expression: exp.Select) -> str:
+            expression = self._select_with_array_join_projection(expression)
+
             # Store the original-to-alias mapping for GROUP BY/ORDER BY reference
             self.expression_to_alias = {}
             # Reverse mapping: alias name -> original expression (for GROUP BY expansion)
@@ -3403,6 +3698,7 @@ class YDB(Dialect):
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
             FlattenBy: lambda self, e: self.flattenby_sql(e),
+            FlattenColumns: lambda self, e: self.flattencolumns_sql(e),
             AssumeOrderBy: lambda self, e: self.assumeorderby_sql(e),
             YdbTuple: lambda self, e: self.ydbtuple_sql(e),
             YdbAtString: lambda self, e: self.ydbatstring_sql(e),
