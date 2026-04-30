@@ -195,6 +195,28 @@ class TestYDBTransforms(Validator):
             "SELECT * FROM `tracks` VIEW tracks_session_id_groupstamp_index WHERE groupstamp >= 0",
         )
 
+    def test_table_view_primary_key_alias(self):
+        self.assertEqual(
+            parse_one(
+                "SELECT * FROM `/db/table` VIEW PRIMARY KEY d",
+                dialect="ydb",
+            ).sql(dialect="ydb"),
+            "SELECT * FROM `/db/table` VIEW PRIMARY KEY d",
+        )
+
+    def test_table_with_source_options(self):
+        sql = (
+            "SELECT * FROM `table` WITH ("
+            "FORMAT = parquet, "
+            "SCHEMA (class String?, timestamp Timestamp, year Int NOT NULL), "
+            "PARTITIONED_BY = (year)"
+            ") WHERE year = 1"
+        )
+        self.assertEqual(
+            parse_one(sql, dialect="ydb").sql(dialect="ydb"),
+            sql,
+        )
+
     def test_at_raw_string_literal(self):
         self.assertEqual(
             parse_one(
@@ -216,6 +238,19 @@ class TestYDBTransforms(Validator):
         self.assertEqual(
             ydb("SELECT * FROM (select * from b) T"),
             "SELECT * FROM (SELECT * FROM `b`) AS T",
+        )
+
+    def test_derived_table_join_using_is_not_decorrelated(self):
+        self.assertEqual(
+            parse_one(
+                "SELECT COUNT(*) AS count FROM (SELECT * FROM `/db/table1` "
+                "WHERE billing_account_id = $billing_account_id_0 AND created_at > $since_0) AS idx "
+                "JOIN `/db/table` AS table USING (id) WHERE status IN ($status_0, $status_1)",
+                dialect="ydb",
+            ).sql(dialect="ydb"),
+            "SELECT COUNT(*) AS count FROM (SELECT * FROM `/db/table1` "
+            "WHERE billing_account_id = $billing_account_id_0 AND created_at > $since_0) AS idx "
+            "JOIN `/db/table` AS table USING (id) WHERE status IN ($status_0, $status_1)",
         )
 
     def test_column_with_table_alias(self):
@@ -383,6 +418,13 @@ class TestYDBTransforms(Validator):
     def test_join_marks_oracle(self):
         parsed = parse_one("select * from a, b where a.id(+) = b.id", dialect="oracle")
         self.assertEqual(eliminate_join_marks(parsed).sql(), "SELECT * FROM b LEFT JOIN a ON a.id = b.id")
+
+    def test_join_on_parenthesized_equalities_stay_in_on(self):
+        sql = (
+            "SELECT * FROM `a` AS a JOIN `b` AS b "
+            "ON (a.x = b.x AND a.y = b.y) AND a.z = b.z"
+        )
+        self.validate_identity(sql)
 
     # --- Subquery unnesting / decorrelation ---------------------------------
 
@@ -606,6 +648,23 @@ class TestYDBParser(Validator):
     def test_flatten_dict_by(self):
         self.validate_identity("SELECT * FROM `t` FLATTEN DICT BY col")
 
+    def test_flatten_optional_by(self):
+        self.validate_identity("SELECT * FROM `t` FLATTEN OPTIONAL BY col")
+
+    def test_flatten_by_alias(self):
+        self.validate_identity("SELECT * FROM `t` FLATTEN BY col AS item")
+
+    def test_flatten_by_multiple_columns(self):
+        self.validate_identity("SELECT * FROM `t` FLATTEN BY (a, b)")
+
+    def test_flatten_by_named_expression(self):
+        self.validate_identity(
+            "SELECT * FROM `t` FLATTEN LIST BY (String::SplitToList(a, ';') AS a, b)"
+        )
+
+    def test_flatten_columns(self):
+        self.validate_identity("SELECT * FROM `t` FLATTEN COLUMNS")
+
     def test_flatten_by_dollar_table(self):
         self.validate_identity("SELECT k, v FROM $t FLATTEN BY vals")
 
@@ -701,6 +760,12 @@ class TestYDBParser(Validator):
         self.validate_identity(
             '($y) -> { $prefix = "x"; RETURN $prefix || $y; }',
             write_sql="($y) -> { $prefix = 'x'; RETURN $prefix || $y }",
+        )
+
+    def test_lambda_block_calls_named_lambda(self):
+        self.validate_identity(
+            "$f = ($key1) -> { $INIT = 0xDEADC0DEul; $Combine = ($first, $second) -> { RETURN Digest::FarmHashFingerprint2($first, $second) }; RETURN $Combine($INIT, Digest::FarmHashFingerprint64($key1)) ^ 1ul; }",
+            write_sql="$f = ($key1) -> { $INIT = 0xDEADC0DEul; $Combine = ($first, $second) -> { RETURN Digest::FarmHashFingerprint2($first, $second) }; RETURN $Combine($INIT, Digest::FarmHashFingerprint64($key1)) ^ 1ul }",
         )
 
     def test_lambda_named_expression_with_in_compact_roundtrip_stable(self):
@@ -1094,4 +1159,75 @@ class TestYDBFromClickHouse(unittest.TestCase):
         self.assertEqual(
             self.ch("SELECT 1, count() FROM t GROUP BY 1"),
             "SELECT 1, COUNT(*) FROM `t`",
+        )
+
+    # --- ARRAY JOIN / arrayJoin ---------------------------------------------
+
+    def test_array_join_to_flatten_by(self):
+        self.assertEqual(
+            self.ch("SELECT * FROM t ARRAY JOIN vals"),
+            "SELECT * FROM `t` FLATTEN BY vals",
+        )
+
+    def test_array_join_alias_to_flatten_by_alias(self):
+        self.assertEqual(
+            self.ch("SELECT * FROM t ARRAY JOIN vals AS v"),
+            "SELECT * FROM `t` FLATTEN BY vals AS v",
+        )
+
+    def test_array_join_function_to_flatten_by(self):
+        self.assertEqual(
+            self.ch("SELECT id, arrayJoin(vals) AS v FROM t"),
+            "SELECT id, v FROM `t` FLATTEN BY vals AS v",
+        )
+
+    def test_multi_array_join_is_not_flatten_by(self):
+        with self.assertRaises(UnsupportedError):
+            self.ch("SELECT * FROM t ARRAY JOIN a, b")
+
+    def test_left_array_join_is_not_flatten_by(self):
+        with self.assertRaises(UnsupportedError):
+            self.ch("SELECT * FROM t LEFT ARRAY JOIN vals AS v")
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL → YDB transpilation
+# ---------------------------------------------------------------------------
+
+class TestYDBFromPostgres(unittest.TestCase):
+    """Tests for source-dialect → YDB transpilation of FLATTEN analogues."""
+
+    maxDiff = None
+
+    def pg(self, sql: str) -> str:
+        return parse_one(sql, dialect="postgres").sql(dialect="ydb")
+
+    def test_unnest_join_to_flatten_by(self):
+        self.assertEqual(
+            self.pg("SELECT * FROM t CROSS JOIN LATERAL unnest(vals)"),
+            "SELECT * FROM `t` FLATTEN BY vals",
+        )
+
+    def test_unnest_comma_join_to_flatten_by(self):
+        self.assertEqual(
+            self.pg("SELECT * FROM t, unnest(vals) AS v"),
+            "SELECT * FROM `t` FLATTEN BY vals AS v",
+        )
+
+    def test_unnest_join_alias_to_flatten_by_alias(self):
+        self.assertEqual(
+            self.pg("SELECT id, v FROM t CROSS JOIN LATERAL unnest(vals) AS v"),
+            "SELECT id, v FROM `t` FLATTEN BY vals AS v",
+        )
+
+    def test_unnest_join_column_alias_to_flatten_by_alias(self):
+        self.assertEqual(
+            self.pg("SELECT id, item FROM t CROSS JOIN LATERAL unnest(vals) AS v(item)"),
+            "SELECT id, item FROM `t` FLATTEN BY vals AS item",
+        )
+
+    def test_independent_unnest_keeps_cross_join(self):
+        self.assertIn(
+            "CROSS JOIN",
+            self.pg("SELECT * FROM t CROSS JOIN LATERAL unnest(ARRAY[1, 2]) AS v"),
         )
