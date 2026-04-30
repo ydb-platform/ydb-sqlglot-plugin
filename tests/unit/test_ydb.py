@@ -217,6 +217,10 @@ class TestYDBTransforms(Validator):
             sql,
         )
 
+    def test_table_with_unparenthesized_source_option(self):
+        sql = "SELECT * FROM `table` WITH TabletId='tablet-1' WHERE id = 1"
+        self.assertEqual(parse_one(sql, dialect="ydb").sql(dialect="ydb"), sql)
+
     def test_at_raw_string_literal(self):
         self.assertEqual(
             parse_one(
@@ -883,6 +887,9 @@ class TestYDBAdvancedSyntax(Validator):
             write_sql="DECLARE $items AS List<Struct<'source_id': Utf8>>",
         )
 
+    def test_declare_quoted_type_name(self):
+        self.validate_identity('DECLARE $uid AS "UserId"')
+
     def test_utf8_string_literal_suffix(self):
         self.validate_identity("SELECT 'value'u AS value")
 
@@ -910,6 +917,13 @@ class TestYDBAdvancedSyntax(Validator):
         self.validate_identity(
             "SELECT JSON_VALUE(payload, '$.name' RETURNING String DEFAULT \"empty\" ON EMPTY NULL ON ERROR)",
             write_sql="SELECT JSON_VALUE(payload, '$.name' RETURNING String DEFAULT 'empty' ON EMPTY NULL ON ERROR)",
+        )
+
+    def test_json_value_with_complex_group_by(self):
+        self.assert_roundtrip_stable(
+            "SELECT SUM(CASE COALESCE(CAST(JSON_VALUE(statistics, '$.retries') AS Uint64), 0) "
+            "WHEN 0 THEN 0 ELSE 1 END) AS with_retries FROM `jobs` "
+            "GROUP BY CASE WHEN flowLaunchId IS NOT NULL THEN 2 ELSE 1 END AS flow_engine_version"
         )
 
     def test_json_exists_simple(self):
