@@ -353,6 +353,9 @@ class TestYDBTransforms(Validator):
     def test_if_passthrough(self):
         self.assertEqual(ydb("SELECT IF(10 > 20, 'TRUE', 'FALSE') FROM data"), "SELECT IF(10 > 20, 'TRUE', 'FALSE') FROM `data`")
 
+    def test_if_without_else_passthrough(self):
+        self.assertEqual(ydb("SELECT IF(x IS NOT NULL, AsStruct(x AS x)) FROM data"), "SELECT IF(NOT (x IS NULL), AsStruct(x AS x)) FROM `data`")
+
     def test_array_any(self):
         self.assertEqual(
             ydb("SELECT * FROM TABLE WHERE ARRAY_ANY(arr, x -> x)"),
@@ -598,6 +601,12 @@ class TestYDBParser(Validator):
     def test_dollar_variable_as_table(self):
         self.validate_identity("SELECT * FROM $t AS t")
 
+    def test_table_name_before_dollar_variable_table(self):
+        self.validate_transpile(
+            "SELECT * FROM `a` AS a JOIN `placeholder` $rows AS b ON a.id = b.id",
+            "SELECT * FROM `a` AS a JOIN $rows AS b ON a.id = b.id",
+        )
+
     def test_dollar_variable_in_select(self):
         self.validate_identity("SELECT $limit FROM `table`")
 
@@ -605,6 +614,12 @@ class TestYDBParser(Validator):
 
     def test_module_function_simple(self):
         self.validate_identity("DateTime::GetYear(ts)")
+
+    def test_double_quoted_string_with_escaped_quotes(self):
+        self.validate_transpile(
+            'SELECT JSON_QUERY(data, "$.dynamicValues.\\"check in\\"") FROM `table`',
+            "SELECT JSON_QUERY(data, '$.dynamicValues.\"check in\"') FROM `table`",
+        )
 
     def test_module_function_nested(self):
         self.validate_identity(
@@ -700,6 +715,9 @@ class TestYDBParser(Validator):
     def test_set(self):
         self.validate_identity("CAST(x AS Set<Utf8>)")
 
+    def test_lowercase_set(self):
+        self.validate_transpile("CAST(x AS set<Utf8>)", "CAST(x AS Set<Utf8>)")
+
     def test_tuple(self):
         self.validate_identity("CAST(x AS Tuple<Int32, Utf8>)")
 
@@ -714,6 +732,9 @@ class TestYDBParser(Validator):
 
     def test_optional_tuple(self):
         self.validate_identity("CAST(x AS Optional<Tuple<Int32, Utf8>>)")
+
+    def test_tuple_shorthand_optional(self):
+        self.validate_transpile("CAST(x AS Tuple<Int32, Utf8>?)", "CAST(x AS Optional<Tuple<Int32, Utf8>>)")
 
     def test_struct_type(self):
         self.validate_identity("DECLARE $x AS Struct<a: Int64, b: Utf8>")
@@ -734,6 +755,29 @@ class TestYDBParser(Validator):
 
     def test_assume_order_by_desc(self):
         self.validate_identity("SELECT * FROM `t` ASSUME ORDER BY id DESC")
+
+    def test_group_compact_by(self):
+        self.validate_transpile(
+            "SELECT source_id FROM `table` GROUP COMPACT BY source_id",
+            "SELECT source_id FROM `table` GROUP BY source_id AS source_id",
+        )
+
+    def test_left_only_join(self):
+        self.validate_identity("SELECT * FROM `a` LEFT ONLY JOIN `b` USING (id)")
+
+    def test_without_projection_after_table_star(self):
+        self.validate_transpile(
+            "SELECT b.*, WITHOUT b.`date`, b.scale FROM `t` AS b",
+            "SELECT b.* WITHOUT (b.`date`, b.scale) FROM `t` AS b",
+        )
+
+    def test_from_first_join_with_without_projection(self):
+        self.validate_transpile(
+            "FROM $t AS a LEFT JOIN (SELECT * FROM $t) AS b USING(id) "
+            "SELECT a.id, b.*, WITHOUT b.id WHERE a.id = 1",
+            "SELECT a.id AS id, b.* WITHOUT (b.id) FROM $t AS a "
+            "LEFT JOIN (SELECT * FROM $t) AS b USING (id) WHERE a.id = 1",
+        )
 
     def test_assume_order_by_multi_col(self):
         self.validate_identity("SELECT * FROM `t` ASSUME ORDER BY id, name")
