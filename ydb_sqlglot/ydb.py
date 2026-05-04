@@ -617,6 +617,8 @@ class YDB(Dialect):
         KEYWORDS = {
             **tokens.Tokenizer.KEYWORDS,
             "DECLARE": TokenType.DECLARE,
+            "GROUP COMPACT BY": TokenType.GROUP_BY,
+            "ONLY": TokenType.ANTI,
             "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
             "STRING": TokenType.BLOB,     # YDB String = bytes = SQL BLOB
         }
@@ -629,6 +631,7 @@ class YDB(Dialect):
 
         SUPPORTS_VALUES_DEFAULT = False
         QUOTES = ["'", '"']
+        STRING_ESCAPES = ["'", '"', "\\"]
         COMMENTS = ["--", ("/*", "*/")]
         IDENTIFIERS = ["`"]
 
@@ -1134,8 +1137,9 @@ class YDB(Dialect):
             # YDB generic types use Name<...> syntax; token type varies by keyword status
             if self._curr and self._next and self._next.token_type == TokenType.LT:
                 name = self._curr.text
+                normalized_name = name.lower()
 
-                if name == "Optional":
+                if normalized_name == "optional":
                     self._advance()  # consume 'Optional'
                     self._advance()  # consume '<'
                     inner = self._parse_types(*args, **kwargs)
@@ -1144,31 +1148,38 @@ class YDB(Dialect):
                         inner.set("nullable", True)
                     return inner
 
-                if name in _YDB_GENERIC_TYPES:
+                generic_type = _YDB_GENERIC_TYPES.get(name) or _YDB_GENERIC_TYPES.get(name.capitalize())
+                if generic_type:
                     self._advance()  # consume type name
                     self._advance()  # consume '<'
                     type_args = self._parse_csv(
                         lambda: self._parse_types(*args, **kwargs)
                     )
                     self._match(TokenType.GT)
-                    return exp.DataType(
-                        this=_YDB_GENERIC_TYPES[name],
+                    dtype = exp.DataType(
+                        this=generic_type,
                         expressions=[a for a in type_args if a],
                         nested=True,
                     )
+                    if self._match(TokenType.PLACEHOLDER):  # T?
+                        dtype.set("nullable", True)
+                    return dtype
 
-                if name == "Struct":
+                if normalized_name == "struct":
                     self._advance()  # consume 'Struct'
                     self._advance()  # consume '<'
                     fields = self._parse_csv(self._parse_ydb_struct_field)
                     self._match(TokenType.GT)
-                    return exp.DataType(
+                    dtype = exp.DataType(
                         this=exp.DataType.Type.STRUCT,
                         expressions=[field for field in fields if field],
                         nested=True,
                     )
+                    if self._match(TokenType.PLACEHOLDER):  # T?
+                        dtype.set("nullable", True)
+                    return dtype
 
-                if name == "Tuple":
+                if normalized_name == "tuple":
                     self._advance()  # consume 'Tuple'
                     self._advance()  # consume '<'
                     type_args = self._parse_csv(
@@ -1177,7 +1188,7 @@ class YDB(Dialect):
                     self._match(TokenType.GT)
                     # Represent as STRUCT so other dialects can serialize it.
                     # kind="tuple" is a YDB-specific marker for the generator to emit Tuple<...>.
-                    return exp.DataType(
+                    dtype = exp.DataType(
                         this=exp.DataType.Type.STRUCT,
                         expressions=[
                             exp.ColumnDef(this=exp.to_identifier(f"_{i}"), kind=a)
@@ -1186,6 +1197,9 @@ class YDB(Dialect):
                         nested=True,
                         kind=exp.Var(this="tuple"),
                     )
+                    if self._match(TokenType.PLACEHOLDER):  # T?
+                        dtype.set("nullable", True)
+                    return dtype
 
             dtype = super()._parse_types(*args, **kwargs)
             if dtype and self._match(TokenType.PLACEHOLDER):  # T?
@@ -1328,6 +1342,49 @@ class YDB(Dialect):
 
             return self.expression(exp.Group(**elements), comments=comments)
 
+        def _parse_expressions(self) -> t.List[exp.Expression]:
+            expressions = []
+
+            while True:
+                if self._curr and self._curr.text.upper() == "WITHOUT":
+                    self._advance()
+                    excluded = self._parse_csv(self._parse_column)
+
+                    for expression in reversed(expressions):
+                        star = expression.this if isinstance(expression, exp.Column) else expression
+                        if isinstance(star, exp.Star):
+                            star.set("except_", excluded)
+                            break
+                    else:
+                        expressions.append(self.expression(exp.Star(except_=excluded)))
+                    break
+
+                expression = self._parse_expression()
+                if expression is not None:
+                    expressions.append(expression)
+
+                if not self._match(TokenType.COMMA):
+                    break
+
+            return expressions
+
+        def _parse_star_ops(self) -> t.Optional[exp.Expression]:
+            star_token = self._prev
+
+            if self._match_text_seq("COLUMNS", "(", advance=False):
+                this = self._parse_function()
+                if isinstance(this, exp.Columns):
+                    this.set("unpack", True)
+                return this
+
+            return self.expression(
+                exp.Star(
+                    except_=self._parse_star_op("EXCEPT", "EXCLUDE", "WITHOUT"),
+                    replace=self._parse_star_op("REPLACE"),
+                    rename=self._parse_star_op("RENAME"),
+                )
+            ).update_positions(star_token)
+
         def _parse_table(self, *args, **kwargs) -> t.Optional[exp.Expression]:
             if self._match(TokenType.L_BRACKET):
                 parts = []
@@ -1340,6 +1397,17 @@ class YDB(Dialect):
                 return table
 
             table = super()._parse_table(*args, **kwargs)
+            if (
+                table
+                and isinstance(table.args.get("alias"), exp.TableAlias)
+                and isinstance(table.args["alias"].this, exp.Parameter)
+            ):
+                table = self.expression(exp.Table(this=table.args["alias"].this))
+                table.set("alias", self._parse_table_alias())
+            if table and self._curr and self._curr.token_type == TokenType.PARAMETER:
+                param = self._parse_parameter()
+                table = self.expression(exp.Table(this=param))
+                table.set("alias", self._parse_table_alias())
             if table and self._match(TokenType.VIEW):
                 table.set("ydb_index_view", self._parse_id_var(any_token=True))
                 table.set("alias", self._parse_table_alias())
@@ -1560,6 +1628,7 @@ class YDB(Dialect):
         """
 
         PARAMETER_TOKEN = "$"
+        STAR_EXCEPT = "WITHOUT"
 
         SUPPORTS_VALUES_DEFAULT = False
         NORMALIZATION_STRATEGY = NormalizationStrategy.CASE_SENSITIVE
@@ -1639,15 +1708,19 @@ class YDB(Dialect):
             Returns:
                 Generated SQL string for the table reference
             """
+            def _with_table_joins(sql: str) -> str:
+                joins = self.expressions(expression, key="joins", sep=" ").strip()
+                return f"{sql} {joins}" if joins else sql
+
             if isinstance(expression.this, exp.Parameter):
                 var = self.sql(expression, "this")
                 alias = f" AS {expression.alias}" if expression.alias else ""
-                return f"{var}{alias}"
+                return _with_table_joins(f"{var}{alias}")
             if isinstance(expression.this, exp.Func):
                 sql = self.sql(expression, "this")
                 if expression.alias:
                     sql += f" AS {expression.alias}"
-                return sql
+                return _with_table_joins(sql)
             prefix = f"{expression.db}/" if expression.db else ""
             sql = f"`{prefix}{expression.name}`"
 
@@ -1664,7 +1737,7 @@ class YDB(Dialect):
             elif expression.alias:
                 sql += f" AS {expression.alias}"
 
-            return sql
+            return _with_table_joins(sql)
 
         def is_sql(self, expression: exp.Is) -> str:
             """
@@ -2345,7 +2418,11 @@ class YDB(Dialect):
                                 f"decorrelated in YDB — rewrite manually using a $variable subquery"
                             )
                     continue
-                if scope.external_columns and scope.scope_type not in (ScopeType.CTE, ScopeType.DERIVED_TABLE):
+                if scope.external_columns and scope.scope_type not in (
+                    ScopeType.CTE,
+                    ScopeType.DERIVED_TABLE,
+                    ScopeType.UNION,
+                ):
                     self.decorrelate(select, parent, scope.external_columns, next_alias_name)
                 if scope.scope_type == ScopeType.SUBQUERY:
                     self.unnest(select, parent, next_alias_name)
@@ -2400,6 +2477,9 @@ class YDB(Dialect):
             Unnests a subquery by transforming it into a join
             """
             if isinstance(select.parent, exp.CTE):
+                return
+
+            if select.find_ancestor(exp.SetOperation):
                 return
 
             if len(select.selects) > 1:
@@ -3077,11 +3157,13 @@ class YDB(Dialect):
 
 
             condition = condition.copy()
-            true_expr = true_expr.copy()
-            false_expr = false_expr.copy()
+            true_expr = true_expr.copy() if true_expr else None
+            false_expr = false_expr.copy() if false_expr else None
 
             this = self.sql(condition)
             true = self.sql(true_expr) if true_expr else ""
+            if false_expr is None:
+                return f"IF({this}, {true})"
             false = self.sql(false_expr) if false_expr else ""
             return f"IF({this}, {true}, {false})"
 
