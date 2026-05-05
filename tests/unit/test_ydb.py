@@ -223,6 +223,42 @@ class TestYDBIdentity(Validator):
         with self.assertRaises(UnsupportedError):
             parse_one("SELECT key, string_column FROM my_table ORDER BY 1", dialect="ydb").sql(dialect="ydb")
 
+    def test_limit_offset_doc_limit_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table LIMIT 7",
+            write_sql="SELECT key FROM `my_table` LIMIT 7",
+        )
+
+    def test_limit_offset_doc_limit_offset_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table LIMIT 7 OFFSET 3",
+            write_sql="SELECT key FROM `my_table` LIMIT 7 OFFSET 3",
+        )
+
+    def test_limit_offset_doc_comma_form_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table LIMIT 3, 7",
+            write_sql="SELECT key FROM `my_table` LIMIT 7 OFFSET 3",
+        )
+
+    def test_sample_doc_tablesample_bernoulli_repeatable_snippet(self):
+        self.validate_identity(
+            "SELECT * FROM my_table TABLESAMPLE BERNOULLI(1.0) REPEATABLE(123)",
+            write_sql="SELECT * FROM `my_table` TABLESAMPLE BERNOULLI(1.0) REPEATABLE(123)",
+        )
+
+    def test_sample_doc_tablesample_system_snippet(self):
+        self.validate_identity(
+            "SELECT * FROM my_table TABLESAMPLE SYSTEM(1.0)",
+            write_sql="SELECT * FROM `my_table` TABLESAMPLE SYSTEM(1.0)",
+        )
+
+    def test_sample_doc_sample_fraction_snippet(self):
+        self.validate_identity(
+            "SELECT * FROM my_table SAMPLE 1.0 / 3",
+            write_sql="SELECT * FROM `my_table` SAMPLE 1.0 / 3",
+        )
+
     def test_window_functions(self):
         cases = [
             "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM `table`",

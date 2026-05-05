@@ -1254,12 +1254,12 @@ class YDB(Dialect):
 
         def _parse_table_alias(self, alias_tokens=None):
             # Prevent YDB-specific keywords from being consumed as table aliases
-            if self._curr and self._curr.text.upper() in ("FLATTEN", "ASSUME", "VIEW"):
+            if self._curr and self._curr.text.upper() in ("FLATTEN", "ASSUME", "VIEW", "SAMPLE"):
                 # Also check that what follows is a YDB construct, not a regular alias
                 if self._next and (
                     self._next.text.upper() in ("BY", "LIST", "DICT", "OPTIONAL", "COLUMNS")
                     or self._next.token_type == TokenType.ORDER_BY
-                    or self._curr.text.upper() == "VIEW"
+                    or self._curr.text.upper() in ("VIEW", "SAMPLE")
                 ):
                     return None
             return super()._parse_table_alias(alias_tokens=alias_tokens)
@@ -1600,6 +1600,16 @@ class YDB(Dialect):
                         depth -= 1
                     else:
                         self._advance()
+            if table and self._curr and self._curr.text.upper() == "SAMPLE":
+                self._advance()
+                sample = self.expression(
+                    exp.TableSample(
+                        method=exp.var("BERNOULLI"),
+                        percent=self._parse_disjunction(),
+                    )
+                )
+                sample.meta["ydb_sample"] = True
+                table.set("sample", sample)
             if table and self._curr and self._curr.text.upper() == "FLATTEN":
                 self._advance()
                 if self._curr and self._curr.text.upper() == "COLUMNS":
@@ -1954,6 +1964,10 @@ class YDB(Dialect):
             if ydb_index_view:
                 sql += f" VIEW {ydb_index_view}"
 
+            sample = self.sql(expression, "sample")
+            if sample:
+                sql += sample
+
             hints = expression.args.get("hints") or []
             if hints and isinstance(hints[0], exp.Var) and hints[0].this.startswith("WITH"):
                 sql += f" {hints[0].this}"
@@ -2021,6 +2035,16 @@ class YDB(Dialect):
                         raise UnsupportedError("YDB ASSUME ORDER BY does not support expressions")
             order = self.sql(expression, "this").lstrip()
             return self.seg(f"ASSUME {order}")
+
+        def tablesample_sql(self, expression: exp.TableSample) -> str:
+            if expression.meta.get("ydb_sample"):
+                return f" SAMPLE {self.sql(expression, 'percent')}"
+
+            method = self.sql(expression, "method")
+            sample_size = self.sql(expression, "percent") or self.sql(expression, "size")
+            seed = self.sql(expression, "seed")
+            seed = f" REPEATABLE({seed})" if seed else ""
+            return f" TABLESAMPLE {method}({sample_size}){seed}"
 
         def ydbtuple_sql(self, expression: YdbTuple) -> str:
             inner = ", ".join(self.sql(e) for e in expression.expressions)
