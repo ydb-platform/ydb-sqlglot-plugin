@@ -785,12 +785,41 @@ class TestYDBParser(Validator):
     def test_regular_order_by_unchanged(self):
         self.validate_identity("SELECT * FROM `t` ORDER BY id")
 
+    def test_yql_interval_function_before_group_by(self):
+        self.validate_transpile(
+            "SELECT device_id FROM `table` WHERE CurrentUtcDate() - Interval('P7D') > ts GROUP BY device_id",
+            "SELECT device_id FROM `table` WHERE CurrentUtcDate() - Interval('P7D') > ts GROUP BY device_id AS device_id",
+        )
+
+    def test_leading_bom_before_named_expression(self):
+        expressions = parse("\ufeff\n$date_parse = DateTime::Parse('format');", dialect="ydb")
+        self.assertEqual(expressions[0].sql(dialect="ydb"), "$date_parse = DateTime::Parse('format')")
+
+    def test_leading_mojibake_bom_before_named_expression(self):
+        expressions = parse("ï»¿\n$date_parse = DateTime::Parse('format');", dialect="ydb")
+        self.assertEqual(expressions[0].sql(dialect="ydb"), "$date_parse = DateTime::Parse('format')")
+
+    def test_struct_literal(self):
+        self.validate_identity("$profile = AsList(<|user_id: 'u1', description: NULL|>)")
+
+    def test_json_path_with_quoted_key(self):
+        self.validate_transpile(
+            'SELECT JSON_EXISTS(item_result, "$.\'P_008 device playback test\'") FROM `t`',
+            "SELECT JSON_EXISTS(item_result, '$.''P_008 device playback test''') FROM `t`",
+        )
+
     # --- Lambda expressions -------------------------------------------------
 
     def test_lambda_return_body_with_semicolon(self):
         self.validate_identity(
             "ListFilter($counterIds, ($x) -> {RETURN $x > $startCounterId;})",
             write_sql="ListFilter($counterIds, ($x) -> ($x > $startCounterId))",
+        )
+
+    def test_lambda_lowercase_return_body_with_semicolon(self):
+        self.validate_identity(
+            "ListMap($contacts, ($i) -> { return Digest::MurMurHash($i); })",
+            write_sql="ListMap($contacts, ($i) -> (Digest::MurMurHash($i)))",
         )
 
     def test_in_compact_parameter(self):
