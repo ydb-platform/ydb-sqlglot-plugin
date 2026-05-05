@@ -91,6 +91,18 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_unique_distinct_hints(self):
+        cases = [
+            "SELECT /*+ unique */ id FROM `table`",
+            "SELECT /*+ distinct */ id FROM `table`",
+            "SELECT /*+ unique(id category) */ id, category FROM `table`",
+            "SELECT /*+ distinct(id category) */ id, category FROM `table`",
+            "SELECT /*+ unique(id category) distinct(source_id) */ id, category, source_id FROM `table`",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
     def test_joins(self):
         cases = [
             "SELECT * FROM `a` INNER JOIN `b` ON a.id = b.id",
@@ -147,10 +159,36 @@ class TestYDBIdentity(Validator):
         cases = [
             "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM `table`",
             "SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY id) FROM `table`",
+            "SELECT COUNT(*) OVER w AS rows_count_in_window, some_other_value FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column ORDER BY int_column)",
+            "SELECT LAG(my_column, 2) OVER w AS row_before_previous_one FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column)",
+            "SELECT LAG(my_column, 2) OVER w AS row_before_previous_one FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column ORDER BY my_column)",
+            "SELECT AVG(some_value) OVER w AS avg_of_prev_current_next, some_other_value FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column ORDER BY int_column ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)",
+            "SELECT SUM(x) OVER (PARTITION BY a + b AS c ORDER BY t) FROM `my_table`",
+            "SELECT SUM(x) OVER (PARTITION COMPACT BY key ORDER BY t) FROM `my_table`",
+            "SELECT SUM(x) OVER (PARTITION COMPACT BY () ORDER BY t) FROM `my_table`",
         ]
         for sql in cases:
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
+
+    def test_window_frame_begin_defaults_to_current_row(self):
+        cases = [
+            (
+                "SELECT SUM(x) OVER (ORDER BY t ROWS UNBOUNDED PRECEDING) FROM `my_table`",
+                "SELECT SUM(x) OVER (ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM `my_table`",
+            ),
+            (
+                "SELECT SUM(x) OVER (ORDER BY t ROWS 3 PRECEDING) FROM `my_table`",
+                "SELECT SUM(x) OVER (ORDER BY t ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) FROM `my_table`",
+            ),
+            (
+                "SELECT SUM(x) OVER (ORDER BY t ROWS CURRENT ROW) FROM `my_table`",
+                "SELECT SUM(x) OVER (ORDER BY t ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM `my_table`",
+            ),
+        ]
+        for sql, write_sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql, write_sql=write_sql)
 
     def test_aggregates(self):
         self.validate_identity(
@@ -242,6 +280,24 @@ class TestYDBTransforms(Validator):
         self.assertEqual(
             ydb("SELECT * FROM (select * from b) T"),
             "SELECT * FROM (SELECT * FROM `b`) AS T",
+        )
+
+    def test_distinct_doc_value_snippet(self):
+        self.validate_transpile(
+            "SELECT DISTINCT value FROM my_table",
+            "SELECT DISTINCT value FROM `my_table`",
+        )
+
+    def test_distinct_doc_aggregate_distinct_values(self):
+        self.validate_transpile(
+            "SELECT COUNT(DISTINCT value) AS count FROM my_table",
+            "SELECT COUNT(DISTINCT value) AS count FROM `my_table`",
+        )
+
+    def test_distinct_doc_calculated_value_uses_subquery(self):
+        self.validate_transpile(
+            "SELECT DISTINCT value + 1 AS value FROM my_table",
+            "SELECT DISTINCT value FROM (SELECT value + 1 AS value FROM `my_table`) AS _distinct",
         )
 
     def test_derived_table_join_using_is_not_decorrelated(self):

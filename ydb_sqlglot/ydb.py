@@ -1325,6 +1325,133 @@ class YDB(Dialect):
                     this.set("order", self.expression(AssumeOrderBy(this=order)))
             return super()._parse_query_modifiers(this)
 
+        def _parse_partition_by(self) -> t.List[exp.Expression]:
+            if self._match(TokenType.PARTITION_BY):
+                return self._parse_csv(
+                    lambda: self._parse_alias(self._parse_disjunction(), explicit=True)
+                )
+
+            if self._match(TokenType.PARTITION):
+                if not self._match_text_seq("COMPACT", "BY"):
+                    self.raise_error("Expected COMPACT BY after PARTITION")
+
+                self._ydb_window_partition_compact = True
+                if self._match_pair(TokenType.L_PAREN, TokenType.R_PAREN):
+                    return []
+
+                return self._parse_csv(
+                    lambda: self._parse_alias(self._parse_disjunction(), explicit=True)
+                )
+
+            return []
+
+        def _parse_window(self, this: t.Optional[exp.Expression], alias: bool = False) -> t.Optional[exp.Expression]:
+            self._ydb_window_partition_compact = False
+            func = this
+            comments = func.comments if isinstance(func, exp.Expression) else None
+
+            if self._match_text_seq("WITHIN", "GROUP"):
+                order = self._parse_wrapped(self._parse_order)
+                this = self.expression(exp.WithinGroup(this=this, expression=order))
+
+            if self._match_pair(TokenType.FILTER, TokenType.L_PAREN):
+                self._match(TokenType.WHERE)
+                this = self.expression(
+                    exp.Filter(this=this, expression=self._parse_where(skip_where_token=True))
+                )
+                self._match_r_paren()
+
+            if isinstance(this, exp.AggFunc):
+                ignore_respect = this.find(exp.IgnoreNulls, exp.RespectNulls)
+
+                if ignore_respect and ignore_respect is not this:
+                    ignore_respect.replace(ignore_respect.this)
+                    this = self.expression(ignore_respect.__class__(this=this))
+
+            this = self._parse_respect_or_ignore_nulls(this)
+
+            if alias:
+                over = None
+                self._match(TokenType.ALIAS)
+            elif not self._match_set(self.WINDOW_BEFORE_PAREN_TOKENS):
+                return this
+            else:
+                over = self._prev.text.upper()
+
+            if comments and isinstance(func, exp.Expression):
+                func.pop_comments()
+
+            if not self._match(TokenType.L_PAREN):
+                return self.expression(
+                    exp.Window(this=this, alias=self._parse_id_var(False), over=over),
+                    comments=comments,
+                )
+
+            if self._curr and self._curr.token_type == TokenType.PARTITION:
+                window_alias = None
+            else:
+                window_alias = self._parse_id_var(
+                    any_token=False,
+                    tokens=self.WINDOW_ALIAS_TOKENS,
+                )
+
+            first = True if self._match(TokenType.FIRST) else None
+            if self._match_text_seq("LAST"):
+                first = False
+
+            partition, order = self._parse_partition_and_order()
+            kind = (
+                self._match_set((TokenType.ROWS, TokenType.RANGE)) or self._match_text_seq("GROUPS")
+            ) and self._prev.text
+
+            if kind:
+                self._match(TokenType.BETWEEN)
+                start = self._parse_window_spec()
+
+                end = self._parse_window_spec() if self._match(TokenType.AND) else {}
+                exclude = (
+                    self._parse_var_from_options(self.WINDOW_EXCLUDE_OPTIONS)
+                    if self._match_text_seq("EXCLUDE")
+                    else None
+                )
+
+                spec = self.expression(
+                    exp.WindowSpec(
+                        kind=kind,
+                        start=start["value"],
+                        start_side=start["side"],
+                        end=end.get("value"),
+                        end_side=end.get("side"),
+                        exclude=exclude,
+                    )
+                )
+            else:
+                spec = None
+
+            self._match_r_paren()
+
+            window = self.expression(
+                exp.Window(
+                    this=this,
+                    partition_by=partition,
+                    order=order,
+                    spec=spec,
+                    alias=window_alias,
+                    over=over,
+                    first=first,
+                ),
+                comments=comments,
+            )
+
+            if self._ydb_window_partition_compact:
+                window.meta["partition_compact"] = True
+            self._ydb_window_partition_compact = False
+
+            if self._match_set(self.WINDOW_BEFORE_PAREN_TOKENS, advance=False):
+                return self._parse_window(window, alias=alias)
+
+            return window
+
         def _parse_group(self, skip_group_by_token: bool = False) -> t.Optional[exp.Group]:
             # This mirrors sqlglot's Parser._parse_group control flow so YDB keeps
             # support for GROUP BY modifiers (WITH ROLLUP, CUBE, GROUPING SETS,
@@ -3524,6 +3651,7 @@ class YDB(Dialect):
 
         def select_sql(self, expression: exp.Select) -> str:
             expression = self._select_with_array_join_projection(expression)
+            expression = self._rewrite_distinct_calculated_values(expression)
 
             # Store the original-to-alias mapping for GROUP BY/ORDER BY reference
             self.expression_to_alias = {}
@@ -3545,6 +3673,56 @@ class YDB(Dialect):
             # in .sql() calls ww generated ydb_variables, drop it not to produce unused vars
             self.ydb_variables = {}
             return super().select_sql(expression)
+
+        def hint_sql(self, expression: exp.Hint) -> str:
+            hints = [str(hint).strip() for hint in expression.expressions if str(hint).strip()]
+            if hints and all(re.match(r"^(unique|distinct)(\s*(?:\(|$))", hint, re.IGNORECASE) for hint in hints):
+                return f" /*+ {' '.join(hints)} */"
+
+            self.unsupported("Hints are not supported")
+            return ""
+
+        def _rewrite_distinct_calculated_values(self, expression: exp.Select) -> exp.Select:
+            if not expression.args.get("distinct"):
+                return expression
+
+            rewritten = False
+            aliases = []
+            inner_expressions = []
+
+            for index, select_expr in enumerate(expression.expressions):
+                expr = select_expr.this if isinstance(select_expr, exp.Alias) else select_expr
+                if isinstance(expr, (exp.Column, exp.Identifier, exp.Star)):
+                    inner_expressions.append(select_expr.copy())
+                    aliases.append(select_expr.alias_or_name)
+                    continue
+
+                rewritten = True
+                alias = select_expr.alias_or_name if isinstance(select_expr, exp.Alias) else f"_distinct_{index}"
+                inner_expressions.append(exp.alias_(expr.copy(), alias))
+                aliases.append(alias)
+
+            if not rewritten:
+                return expression
+
+            inner = expression.copy()
+            inner.set("distinct", None)
+            inner.set("expressions", inner_expressions)
+
+            outer = exp.Select(
+                distinct=expression.args["distinct"].copy(),
+                expressions=[exp.column(alias) for alias in aliases],
+            )
+            outer.set(
+                "from_",
+                exp.From(
+                    this=exp.Subquery(
+                        this=inner,
+                        alias=exp.TableAlias(this=exp.to_identifier("_distinct")),
+                    )
+                ),
+            )
+            return outer
 
         def _contains_literals(self, condition: exp.Expression) -> bool:
             return condition.find(exp.Literal) is not None
@@ -3813,6 +3991,12 @@ class YDB(Dialect):
                 result += f"{separator}{', '.join(extensions)}"
 
             return result
+
+        def partition_by_sql(self, expression: t.Union[exp.Window, exp.MatchRecognize]) -> str:
+            partition = self.expressions(expression, key="partition_by", flat=True)
+            if expression.meta.get("partition_compact"):
+                return f"PARTITION COMPACT BY {partition or '()'}"
+            return f"PARTITION BY {partition}" if partition else ""
 
         # YDB uses C-like string escaping: backslash must be doubled in literals.
         _YDB_ESCAPE_MAP = str.maketrans({
