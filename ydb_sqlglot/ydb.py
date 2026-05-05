@@ -623,6 +623,7 @@ class YDB(Dialect):
             **tokens.Tokenizer.KEYWORDS,
             "DECLARE": TokenType.DECLARE,
             "GROUP COMPACT BY": TokenType.GROUP_BY,
+            "MATCH_RECOGNIZE": TokenType.MATCH_RECOGNIZE,
             "EXCLUSION": TokenType.ANTI,
             "ONLY": TokenType.ANTI,
             "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
@@ -2045,6 +2046,16 @@ class YDB(Dialect):
             seed = self.sql(expression, "seed")
             seed = f" REPEATABLE({seed})" if seed else ""
             return f" TABLESAMPLE {method}({sample_size}){seed}"
+
+        def matchrecognize_sql(self, expression: exp.MatchRecognize) -> str:
+            after = self.sql(expression, "after")
+            if after and after not in (
+                "AFTER MATCH SKIP TO NEXT ROW",
+                "AFTER MATCH SKIP PAST LAST ROW",
+            ):
+                raise UnsupportedError(f"YDB does not support {after}")
+
+            return super().matchrecognize_sql(expression)
 
         def ydbtuple_sql(self, expression: YdbTuple) -> str:
             inner = ", ".join(self.sql(e) for e in expression.expressions)

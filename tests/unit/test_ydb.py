@@ -259,6 +259,115 @@ class TestYDBIdentity(Validator):
             write_sql="SELECT * FROM `my_table` SAMPLE 1.0 / 3",
         )
 
+    def test_match_recognize_doc_usage_snippet(self):
+        sql = (
+            'PRAGMA FeatureR010="prototype"; '
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PARTITION BY device_id, zone_id "
+            "ORDER BY ts "
+            "MEASURES LAST(B1.ts) AS b1, LAST(B3.ts) AS b3 "
+            "ONE ROW PER MATCH "
+            "AFTER MATCH SKIP TO NEXT ROW "
+            "PATTERN (B1 B2+ B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA FeatureR010 = 'prototype';\n"
+            "SELECT * FROM `input` MATCH_RECOGNIZE ("
+            "PARTITION BY device_id, zone_id "
+            "ORDER BY ts "
+            "MEASURES LAST(B1.ts) AS b1, LAST(B3.ts) AS b3 "
+            "ONE ROW PER MATCH "
+            "AFTER MATCH SKIP TO NEXT ROW "
+            "PATTERN (B1 B2+ B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")",
+            generated,
+        )
+
+    def test_match_recognize_doc_pattern_and_define_snippets(self):
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PATTERN (B1 E* B2+ B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ( "
+                "PATTERN (B1 E* B2+ B3) "
+                "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+                ")"
+            ),
+        )
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PATTERN (A B) "
+            "DEFINE A AS A.button = 1 AND LAST(A.zone_id) = 12, "
+            "B AS B.button = 2 AND FIRST(A.zone_id) = 12"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ( "
+                "PATTERN (A B) "
+                "DEFINE A AS A.button = 1 AND LAST(A.zone_id) = 12, "
+                "B AS B.button = 2 AND FIRST(A.zone_id) = 12"
+                ")"
+            ),
+        )
+
+    def test_match_recognize_doc_rows_per_match_and_after_skip_snippets(self):
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "MEASURES FIRST(B1.ts) AS first_ts, FIRST(B2.ts) AS mid_ts, LAST(B3.ts) AS last_ts "
+            "ALL ROWS PER MATCH "
+            "AFTER MATCH SKIP PAST LAST ROW "
+            "PATTERN (B1 {- B2 -} B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ( "
+                "MEASURES FIRST(B1.ts) AS first_ts, FIRST(B2.ts) AS mid_ts, LAST(B3.ts) AS last_ts "
+                "ALL ROWS PER MATCH "
+                "AFTER MATCH SKIP PAST LAST ROW "
+                "PATTERN (B1 {- B2 -} B3) "
+                "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+                ")"
+            ),
+        )
+
+    def test_match_recognize_doc_order_and_partition_snippets(self):
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PARTITION BY device_id, zone_id "
+            "ORDER BY CAST(ts AS Timestamp) "
+            "PATTERN (B1) "
+            "DEFINE B1 AS B1.button = 1"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ("
+                "PARTITION BY device_id, zone_id "
+                "ORDER BY CAST(ts AS Timestamp) "
+                "PATTERN (B1) "
+                "DEFINE B1 AS B1.button = 1"
+                ")"
+            ),
+        )
+
+    def test_match_recognize_doc_rejects_unsupported_after_skip_modes(self):
+        with self.assertRaises(UnsupportedError):
+            parse_one(
+                "SELECT * FROM input MATCH_RECOGNIZE ("
+                "AFTER MATCH SKIP TO FIRST B1 "
+                "PATTERN (B1) "
+                "DEFINE B1 AS B1.button = 1"
+                ")",
+                dialect="ydb",
+            ).sql(dialect="ydb")
+
     def test_window_functions(self):
         cases = [
             "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM `table`",
