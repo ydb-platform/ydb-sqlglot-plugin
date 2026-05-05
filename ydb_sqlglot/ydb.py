@@ -623,6 +623,7 @@ class YDB(Dialect):
             **tokens.Tokenizer.KEYWORDS,
             "DECLARE": TokenType.DECLARE,
             "GROUP COMPACT BY": TokenType.GROUP_BY,
+            "EXCLUSION": TokenType.ANTI,
             "ONLY": TokenType.ANTI,
             "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
             "STRING": TokenType.BLOB,     # YDB String = bytes = SQL BLOB
@@ -858,7 +859,7 @@ class YDB(Dialect):
             if (
                 self._curr
                 and self._curr.token_type == TokenType.VAR
-                and self._curr.text.lower() == "u"
+                and self._curr.text.lower() in ("u", "j")
                 and token.end + 1 == self._curr.start
             ):
                 literal.meta["ydb_string_suffix"] = self._curr.text
@@ -1121,7 +1122,7 @@ class YDB(Dialect):
                 and self._next
                 and self._curr.token_type == TokenType.STRING
                 and self._next.token_type == TokenType.VAR
-                and self._next.text.lower() == "u"
+                and self._next.text.lower() in ("u", "j")
                 and self._curr.end + 1 == self._next.start
             ):
                 token = self._curr
@@ -1474,6 +1475,18 @@ class YDB(Dialect):
                 cols = self._parse_csv(_parse_flatten_expr)
                 if grouped:
                     self._match_r_paren()
+
+                if len(cols) > 1 and not grouped:
+                    self.raise_error("FLATTEN BY multiple columns must be parenthesized")
+
+                for col in cols:
+                    flatten_expr = col.this if isinstance(col, exp.Alias) else col
+                    is_column = isinstance(flatten_expr, exp.Column)
+                    if not is_column:
+                        if not isinstance(col, exp.Alias):
+                            self.raise_error("FLATTEN BY expression requires AS alias")
+                        if not grouped:
+                            self.raise_error("FLATTEN BY expression must be parenthesized")
 
                 return self.expression(
                     FlattenBy(this=table, expressions=cols, kind=kind, grouped=grouped)
@@ -2272,6 +2285,10 @@ class YDB(Dialect):
                 all_with = list(expression.find_all(exp.With))
                 for w in all_with:
                     w.pop()
+                if isinstance(expression, exp.Query):
+                    expression.set("with_", None)
+                for query in expression.find_all(exp.Query):
+                    query.set("with_", None)
 
                 output = ""
 

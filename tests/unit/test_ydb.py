@@ -1,6 +1,6 @@
 import unittest
 
-from sqlglot import ErrorLevel, UnsupportedError, parse, parse_one
+from sqlglot import ErrorLevel, ParseError, UnsupportedError, parse, parse_one
 from sqlglot.parser import logger as parser_logger
 
 from ydb_sqlglot.ydb import eliminate_join_marks, make_db_name_lower, table_names_to_lower_case
@@ -593,6 +593,19 @@ class TestYDBParser(Validator):
     dialect = "ydb"
     maxDiff = None
 
+    def assert_roundtrip_stable(self, sql: str) -> None:
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        regenerated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(generated, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(generated, regenerated)
+
     # --- $varname -----------------------------------------------------------
 
     def test_dollar_variable_in_expr(self):
@@ -676,10 +689,81 @@ class TestYDBParser(Validator):
     def test_flatten_by_multiple_columns(self):
         self.validate_identity("SELECT * FROM `t` FLATTEN BY (a, b)")
 
+    def test_flatten_by_parenthesized_single_column(self):
+        self.validate_identity("SELECT value, id FROM as_table($sample) FLATTEN BY (value)")
+
+    def test_flatten_dict_by_alias_after_table_alias(self):
+        self.validate_identity("SELECT * FROM `my_table` AS t FLATTEN DICT BY dict_column AS item")
+
     def test_flatten_by_named_expression(self):
         self.validate_identity(
             "SELECT * FROM `t` FLATTEN LIST BY (String::SplitToList(a, ';') AS a, b)"
         )
+
+    def test_flatten_page_sample_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """$sample = AsList(
+    AsStruct(AsList('a','b','c') AS value, CAST(1 AS Uint32) AS id),
+    AsStruct(AsList('d') AS value, CAST(2 AS Uint32) AS id),
+    AsStruct(AsList() AS value, CAST(3 AS Uint32) AS id)
+);
+
+SELECT value, id FROM as_table($sample) FLATTEN BY (value);"""
+        )
+
+    def test_flatten_dict_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT
+  t.item.0 AS key,
+  t.item.1 AS value,
+  t.dict_column AS original_dict,
+  t.other_column AS other
+FROM my_table AS t
+FLATTEN DICT BY dict_column AS item;"""
+        )
+
+    def test_flatten_list_multiple_columns_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT * FROM (
+    SELECT
+        AsList(1, 2, 3) AS a,
+        AsList("x", "y", "z") AS b
+) FLATTEN LIST BY (a, b);"""
+        )
+
+    def test_flatten_named_expression_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT * FROM (
+    SELECT
+        "1;2;3" AS a,
+        AsList("x", "y", "z") AS b
+) FLATTEN LIST BY (String::SplitToList(a, ";") as a, b);"""
+        )
+
+    def test_flatten_columns_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT x, y, z
+FROM (
+  SELECT
+    AsStruct(
+        1 AS x,
+        "foo" AS y),
+    AsStruct(
+        false AS z)
+) FLATTEN COLUMNS;"""
+        )
+
+    def test_flatten_by_multiple_columns_requires_parentheses(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("SELECT * FROM `t` FLATTEN BY a, b")
+
+    def test_flatten_by_arbitrary_expression_requires_alias_and_parentheses(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("SELECT * FROM `t` FLATTEN BY ListSkip(col, 1)")
+
+    def test_flatten_by_parenthesized_arbitrary_expression_requires_alias(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("SELECT * FROM `t` FLATTEN BY (ListSkip(col, 1))")
 
     def test_flatten_columns(self):
         self.validate_identity("SELECT * FROM `t` FLATTEN COLUMNS")
@@ -764,6 +848,24 @@ class TestYDBParser(Validator):
 
     def test_left_only_join(self):
         self.validate_identity("SELECT * FROM `a` LEFT ONLY JOIN `b` USING (id)")
+
+    def test_exclusion_join(self):
+        self.validate_identity("SELECT t.* FROM $t AS t EXCLUSION JOIN `m` AS m ON t.id = m.id")
+
+    def test_named_select_with_exclusion_join(self):
+        expressions = parse(
+            "$t = SELECT * FROM `table_1` WHERE source_event_type != 'delete';\n"
+            "SELECT t.* FROM $t AS t EXCLUSION JOIN `table_2` AS m "
+            "ON t.iam_authorized_key_id = m.iam_authorized_key_id",
+            dialect="ydb",
+        )
+        generated = ";\n".join(expression.sql(dialect="ydb") for expression in expressions if expression)
+        self.assertEqual(
+            generated,
+            "$t = (SELECT * FROM `table_1` WHERE source_event_type <> 'delete');\n\n"
+            "SELECT t.* FROM $t AS t EXCLUSION JOIN `table_2` AS m "
+            "ON t.iam_authorized_key_id = m.iam_authorized_key_id",
+        )
 
     def test_without_projection_after_table_star(self):
         self.validate_transpile(
@@ -966,6 +1068,12 @@ class TestYDBAdvancedSyntax(Validator):
     def test_utf8_string_literal_suffix(self):
         self.validate_identity("SELECT 'value'u AS value")
 
+    def test_json_string_literal_suffix(self):
+        self.validate_identity(
+            "SELECT options ?? '[]'j AS options FROM `zones`",
+            write_sql="SELECT COALESCE(options, '[]'j) AS options FROM `zones`",
+        )
+
     def test_json_value_returning_type(self):
         self.validate_identity(
             "SELECT JSON_VALUE(payload, '$.size' RETURNING Int64) AS size FROM `events`"
@@ -1052,6 +1160,22 @@ class TestYDBAdvancedSyntax(Validator):
             "LEFT JOIN $user_likes AS ul ON ul.post_id = p.id\n"
             "WHERE p.id = $id"
         )
+
+    def test_named_query_with_group_by_roundtrip_does_not_generate_empty_with(self):
+        sql = (
+            "$recent_failed_tests_d = SELECT DISTINCT join_key FROM `failed`;\n"
+            "SELECT pta.folder_name AS folder_name, "
+            "SUM(CASE WHEN status LIKE 'FAILED' THEN 1 ELSE 0 END) AS status "
+            "FROM `tests` AS pta "
+            "INNER JOIN $recent_failed_tests_d AS ot ON pta.join_key = ot.join_key "
+            "WHERE status LIKE 'FAILED' "
+            "GROUP BY pta.folder_name, pta.status "
+            "HAVING SUM(CASE WHEN status LIKE 'FAILED' THEN 1 ELSE 0 END) > 0 "
+            "ORDER BY status DESC LIMIT 20 OFFSET 0"
+        )
+        generated = parse_one(sql, dialect="ydb").sql(dialect="ydb")
+        self.assertNotIn("WITH  SELECT", generated)
+        parse_one(generated, dialect="ydb")
 
     def test_table_valued_function_roundtrip_stable(self):
         self.validate_identity("SELECT * FROM AS_TABLE($Input) AS k")
