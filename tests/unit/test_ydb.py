@@ -130,6 +130,32 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_union_doc_examples(self):
+        self.validate_identity(
+            "SELECT key FROM `T1` UNION SELECT key FROM `T2`",
+        )
+        self.validate_identity(
+            "SELECT 1 AS x UNION ALL SELECT 2 AS y UNION ALL SELECT 3 AS z",
+        )
+
+    def test_union_doc_positional_union_all_pragma_example(self):
+        sql = (
+            "PRAGMA PositionalUnionAll;\n\n"
+            "SELECT 1 AS x, 2 AS y\n"
+            "UNION ALL\n"
+            "SELECT * FROM AS_TABLE([<|x:3, y:4|>])"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA PositionalUnionAll;\n"
+            "SELECT 1 AS x, 2 AS y UNION ALL SELECT * FROM AS_TABLE(AsList(<|x: 3, y: 4|>))",
+            generated,
+        )
+
     def test_expressions(self):
         cases = [
             "SELECT CASE WHEN id = 1 THEN 'one' WHEN id = 2 THEN 'two' ELSE 'other' END FROM `table`",
@@ -242,6 +268,28 @@ class TestYDBTransforms(Validator):
             "SELECT * FROM `/db/table` VIEW PRIMARY KEY d",
         )
 
+    def test_secondary_index_doc_select_snippet(self):
+        self.validate_transpile(
+            "SELECT series_id, title, info, release_date, views, uploaded_user_id "
+            "FROM series VIEW views_index WHERE views >= someValue",
+            "SELECT series_id, title, info, release_date, views, uploaded_user_id "
+            "FROM `series` VIEW views_index WHERE views >= someValue",
+        )
+
+    def test_secondary_index_doc_join_snippet(self):
+        self.validate_transpile(
+            "SELECT t1.series_id, t1.title "
+            "FROM series VIEW users_index AS t1 "
+            "INNER JOIN users VIEW name_index AS t2 "
+            "ON t1.uploaded_user_id == t2.user_id "
+            "WHERE t2.name == userName",
+            "SELECT t1.series_id AS series_id, t1.title AS title "
+            "FROM `series` VIEW users_index AS t1 "
+            "INNER JOIN `users` VIEW name_index AS t2 "
+            "ON t1.uploaded_user_id = t2.user_id "
+            "WHERE t2.name = userName",
+        )
+
     def test_table_with_source_options(self):
         sql = (
             "SELECT * FROM `table` WITH ("
@@ -258,6 +306,34 @@ class TestYDBTransforms(Validator):
     def test_table_with_unparenthesized_source_option(self):
         sql = "SELECT * FROM `table` WITH TabletId='tablet-1' WHERE id = 1"
         self.assertEqual(parse_one(sql, dialect="ydb").sql(dialect="ydb"), sql)
+
+    def test_with_doc_infer_schema_snippets(self):
+        self.validate_transpile(
+            "SELECT key FROM my_table WITH INFER_SCHEMA",
+            "SELECT key FROM `my_table` WITH INFER_SCHEMA",
+        )
+        self.validate_transpile(
+            'SELECT key FROM my_table WITH FORCE_INFER_SCHEMA="42"',
+            'SELECT key FROM `my_table` WITH FORCE_INFER_SCHEMA="42"',
+        )
+
+    def test_with_doc_named_expression_xlock_snippet(self):
+        self.validate_identity("$s = (SELECT COUNT(*) FROM `my_table` WITH XLOCK)")
+
+    def test_with_doc_schema_and_columns_snippets(self):
+        self.validate_transpile(
+            "SELECT key, value FROM my_table WITH SCHEMA Struct<key:String, value:Int32>",
+            "SELECT key, value FROM `my_table` WITH SCHEMA Struct<key:String, value:Int32>",
+        )
+        self.validate_transpile(
+            "SELECT key, value FROM my_table WITH COLUMNS Struct<value:Int32?>",
+            "SELECT key, value FROM `my_table` WITH COLUMNS Struct<value:Int32?>",
+        )
+
+    def test_with_doc_each_schema_snippet(self):
+        self.validate_identity(
+            "SELECT key, value FROM EACH($my_tables) WITH SCHEMA Struct<key:String, value:List<Int32>>"
+        )
 
     def test_at_raw_string_literal(self):
         self.assertEqual(

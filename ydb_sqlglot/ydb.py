@@ -1303,6 +1303,8 @@ class YDB(Dialect):
                 TokenType.FULL,
                 TokenType.CROSS,
                 TokenType.INNER,
+                TokenType.R_PAREN,
+                TokenType.SEMICOLON,
             }
             while self._curr and self._curr.token_type not in stop_tokens:
                 end = self._curr.end
@@ -1929,6 +1931,9 @@ class YDB(Dialect):
                 return _with_table_joins(f"{var}{alias}")
             if isinstance(expression.this, exp.Func):
                 sql = self.sql(expression, "this")
+                hints = expression.args.get("hints") or []
+                if hints and isinstance(hints[0], exp.Var) and hints[0].this.startswith("WITH"):
+                    sql += f" {hints[0].this}"
                 if expression.alias:
                     sql += f" AS {expression.alias}"
                 return _with_table_joins(sql)
