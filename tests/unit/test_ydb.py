@@ -954,6 +954,71 @@ GROUP BY user, SessionWindow(ts, $init, $update, $calculate) AS session_start;""
     def test_left_only_join(self):
         self.validate_identity("SELECT * FROM `a` LEFT ONLY JOIN `b` USING (id)")
 
+    def test_join_doc_default_inner_join_type(self):
+        self.validate_identity("SELECT * FROM `a` JOIN `b` ON a.id = b.id")
+
+    def test_join_doc_join_types(self):
+        cases = [
+            "SELECT * FROM `a` LEFT JOIN `b` USING (key)",
+            "SELECT * FROM `a` RIGHT JOIN `b` USING (key)",
+            "SELECT * FROM `a` FULL JOIN `b` USING (key)",
+            "SELECT * FROM `a` LEFT SEMI JOIN `b` USING (key)",
+            "SELECT * FROM `a` RIGHT SEMI JOIN `b` USING (key)",
+            "SELECT * FROM `a` LEFT ONLY JOIN `b` USING (key)",
+            "SELECT * FROM `a` RIGHT ONLY JOIN `b` USING (key)",
+            "SELECT * FROM `a` CROSS JOIN `b`",
+            "SELECT * FROM `a` EXCLUSION JOIN `b` USING (key)",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
+    def test_join_doc_full_join_using_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM a_table AS a FULL JOIN b_table AS b USING (key)",
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM `a_table` AS a FULL JOIN `b_table` AS b USING (key)",
+        )
+
+    def test_join_doc_full_join_on_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM a_table AS a FULL JOIN b_table AS b ON a.key = b.key",
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM `a_table` AS a FULL JOIN `b_table` AS b ON a.key = b.key",
+        )
+
+    def test_join_doc_cross_then_left_join_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value, c.column2 "
+            "FROM a_table AS a CROSS JOIN b_table AS b "
+            "LEFT JOIN c_table AS c ON c.ref = a.key AND c.column1 = b.value",
+            "SELECT a.value AS a_value, b.value AS b_value, c.column2 AS column2 "
+            "FROM `a_table` AS a CROSS JOIN `b_table` AS b "
+            "LEFT JOIN `c_table` AS c ON c.ref = a.key AND c.column1 = b.value",
+        )
+
+    def test_join_doc_index_lookup_join_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value FROM a_table AS a "
+            "INNER JOIN b_table VIEW b_index_ref AS b ON a.ref = b.ref",
+            "SELECT a.value AS a_value, b.value AS b_value FROM `a_table` AS a "
+            "INNER JOIN `b_table` VIEW b_index_ref AS b ON a.ref = b.ref",
+        )
+
+    def test_join_doc_on_allows_equality_over_expressions(self):
+        self.validate_transpile(
+            "SELECT * FROM a JOIN b ON a.key + 1 = b.key",
+            "SELECT * FROM `a` JOIN `b` ON a.key + 1 = b.key",
+        )
+
+    def test_join_doc_on_moves_non_equality_to_where(self):
+        self.validate_transpile(
+            "SELECT * FROM a LEFT JOIN b ON a.id = b.id AND b.value > 0",
+            "SELECT * FROM `a` LEFT JOIN `b` ON a.id = b.id WHERE b.value > 0",
+        )
+
     def test_exclusion_join(self):
         self.validate_identity("SELECT t.* FROM $t AS t EXCLUSION JOIN `m` AS m ON t.id = m.id")
 

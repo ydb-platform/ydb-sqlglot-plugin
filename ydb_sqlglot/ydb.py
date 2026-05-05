@@ -1446,7 +1446,10 @@ class YDB(Dialect):
                 table.set("alias", self._parse_table_alias())
             if table and self._match(TokenType.VIEW):
                 table.set("ydb_index_view", self._parse_id_var(any_token=True))
+                explicit_alias = bool(self._curr and self._curr.token_type == TokenType.ALIAS)
                 table.set("alias", self._parse_table_alias())
+                if explicit_alias:
+                    table.meta["ydb_index_view_explicit_alias"] = True
             if table and self._curr and self._curr.token_type == TokenType.WITH and self._next and self._next.token_type == TokenType.L_PAREN:
                 self._advance()
                 self._advance()
@@ -1814,7 +1817,8 @@ class YDB(Dialect):
                 sql += f" {hints[0].this}"
 
             if expression.alias and ydb_index_view:
-                sql += f" {expression.alias}"
+                alias_prefix = " AS" if expression.meta.get("ydb_index_view_explicit_alias") else ""
+                sql += f"{alias_prefix} {expression.alias}"
             elif expression.alias:
                 sql += f" AS {expression.alias}"
 
@@ -3315,21 +3319,8 @@ class YDB(Dialect):
                 return super().join_sql(expression)
 
             if on_condition:
-                # For OUTER JOINs (LEFT / RIGHT / FULL), keep the entire ON clause intact.
-                # Moving non-equality conditions from ON to WHERE changes the semantics:
-                # in a LEFT JOIN, a non-equality filter in ON still produces a row for the
-                # left-side record (with NULLs on the right), whereas the same filter in
-                # WHERE would eliminate that row.  Pass outer-join ON clauses through
-                # unchanged; YDB accepts non-equality predicates in OUTER JOIN ON.
-                join_is_outer = any(
-                    k in (expression.side or "").upper()
-                    for k in ["LEFT", "RIGHT", "FULL"]
-                )
-                if join_is_outer:
-                    return super().join_sql(expression)
-
                 # Extract all non-equality conditions (including those with literals)
-                # YDB only allows equality predicates in INNER/CROSS JOIN ON
+                # YDB only allows equality predicates in JOIN ON.
                 literal_conditions: list[Expression] = []
                 non_equality_conditions: list[Expression] = []
                 equality_conditions: list[Expression] = []
@@ -3344,25 +3335,32 @@ class YDB(Dialect):
                         return conditions
                     return [condition]
 
+                def _column_tables(value: exp.Expression) -> set[str]:
+                    return {
+                        column.table
+                        for column in value.find_all(exp.Column)
+                        if column.table
+                    }
+
+                def _is_join_equality(condition: exp.EQ) -> bool:
+                    left = condition.this
+                    right = condition.expression
+
+                    if isinstance(left, exp.Column) and isinstance(right, exp.Column):
+                        left_table = left.table
+                        right_table = right.table
+                        return bool((left_table or right_table) and left_table != right_table)
+
+                    left_tables = _column_tables(left)
+                    right_tables = _column_tables(right)
+                    return bool(left_tables and right_tables and left_tables.isdisjoint(right_tables))
+
                 conditions = _flatten_join_conditions(on_condition)
 
                 for cond in conditions:
                     # Check if it's an equality predicate
                     if isinstance(cond, exp.EQ):
-                        # Check if it's a true equi-join (columns from different tables)
-                        left = cond.this
-                        right = cond.expression
-                        left_table = getattr(left, "table", None) if isinstance(left, exp.Column) else None
-                        right_table = getattr(right, "table", None) if isinstance(right, exp.Column) else None
-                        if (
-                                isinstance(left, exp.Column)
-                                and isinstance(right, exp.Column)
-                                # At least one side must be table-qualified and they must differ
-                                # (this covers cases where one side has no qualifier, e.g.
-                                #  ps_suppkey = _u_1.s_suppkey from NOT IN unnesting)
-                                and (left_table or right_table)
-                                and left_table != right_table
-                        ):
+                        if _is_join_equality(cond):
                             equality_conditions.append(cond)
                         else:
                             if self._contains_literals(cond):
