@@ -1542,6 +1542,16 @@ class YDB(Dialect):
                     this.set("unpack", True)
                 return this
 
+            if self._curr and self._curr.text.upper() == "WITHOUT":
+                self._advance()
+                return self.expression(
+                    exp.Star(
+                        except_=self._parse_csv(self._parse_column),
+                        replace=None,
+                        rename=None,
+                    )
+                ).update_positions(star_token)
+
             return self.expression(
                 exp.Star(
                     except_=self._parse_star_op("EXCEPT", "EXCLUDE", "WITHOUT"),

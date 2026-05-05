@@ -156,6 +156,29 @@ class TestYDBIdentity(Validator):
             generated,
         )
 
+    def test_without_doc_exclude_columns_snippet(self):
+        self.validate_identity(
+            "SELECT * WITHOUT foo, bar FROM `my_table`",
+            write_sql="SELECT * WITHOUT (foo, bar) FROM `my_table`",
+        )
+
+    def test_without_doc_simplecolumns_qualified_snippet(self):
+        sql = (
+            "PRAGMA simplecolumns;\n"
+            "SELECT * WITHOUT t.foo FROM my_table AS t\n"
+            "CROSS JOIN (SELECT 1 AS foo) AS v"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA simplecolumns;\n"
+            "SELECT * WITHOUT (t.foo) FROM `my_table` AS t CROSS JOIN (SELECT 1 AS foo) AS v",
+            generated,
+        )
+
     def test_expressions(self):
         cases = [
             "SELECT CASE WHEN id = 1 THEN 'one' WHEN id = 2 THEN 'two' ELSE 'other' END FROM `table`",
