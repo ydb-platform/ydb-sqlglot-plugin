@@ -1,3 +1,4 @@
+## 0.2.4 ##
 * Parse YQL Interval(...) calls, struct literals, leading BOM tokens, and lowercase lambda RETURN blocks
 * Support GROUP COMPACT BY, LEFT ONLY JOIN, YDB WITHOUT projections, escaped double-quoted strings, and optional generic type shorthand
 * Handle dollar-parameter table references and table-attached joins more robustly, and avoid decorrelating set-operation subqueries
