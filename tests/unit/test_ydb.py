@@ -1,6 +1,6 @@
 import unittest
 
-from sqlglot import ErrorLevel, UnsupportedError, parse, parse_one
+from sqlglot import ErrorLevel, ParseError, UnsupportedError, parse, parse_one
 from sqlglot.parser import logger as parser_logger
 
 from ydb_sqlglot.ydb import eliminate_join_marks, make_db_name_lower, table_names_to_lower_case
@@ -91,6 +91,18 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_unique_distinct_hints(self):
+        cases = [
+            "SELECT /*+ unique */ id FROM `table`",
+            "SELECT /*+ distinct */ id FROM `table`",
+            "SELECT /*+ unique(id category) */ id, category FROM `table`",
+            "SELECT /*+ distinct(id category) */ id, category FROM `table`",
+            "SELECT /*+ unique(id category) distinct(source_id) */ id, category, source_id FROM `table`",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
     def test_joins(self):
         cases = [
             "SELECT * FROM `a` INNER JOIN `b` ON a.id = b.id",
@@ -118,6 +130,55 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_union_doc_examples(self):
+        self.validate_identity(
+            "SELECT key FROM `T1` UNION SELECT key FROM `T2`",
+        )
+        self.validate_identity(
+            "SELECT 1 AS x UNION ALL SELECT 2 AS y UNION ALL SELECT 3 AS z",
+        )
+
+    def test_union_doc_positional_union_all_pragma_example(self):
+        sql = (
+            "PRAGMA PositionalUnionAll;\n\n"
+            "SELECT 1 AS x, 2 AS y\n"
+            "UNION ALL\n"
+            "SELECT * FROM AS_TABLE([<|x:3, y:4|>])"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA PositionalUnionAll;\n"
+            "SELECT 1 AS x, 2 AS y UNION ALL SELECT * FROM AS_TABLE(AsList(<|x: 3, y: 4|>))",
+            generated,
+        )
+
+    def test_without_doc_exclude_columns_snippet(self):
+        self.validate_identity(
+            "SELECT * WITHOUT foo, bar FROM `my_table`",
+            write_sql="SELECT * WITHOUT (foo, bar) FROM `my_table`",
+        )
+
+    def test_without_doc_simplecolumns_qualified_snippet(self):
+        sql = (
+            "PRAGMA simplecolumns;\n"
+            "SELECT * WITHOUT t.foo FROM my_table AS t\n"
+            "CROSS JOIN (SELECT 1 AS foo) AS v"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA simplecolumns;\n"
+            "SELECT * WITHOUT (t.foo) FROM `my_table` AS t CROSS JOIN (SELECT 1 AS foo) AS v",
+            generated,
+        )
+
     def test_expressions(self):
         cases = [
             "SELECT CASE WHEN id = 1 THEN 'one' WHEN id = 2 THEN 'two' ELSE 'other' END FROM `table`",
@@ -143,14 +204,204 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_where_doc_filter_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table WHERE value > 0",
+            write_sql="SELECT key FROM `my_table` WHERE value > 0",
+        )
+
+    def test_order_by_doc_sorting_criteria_snippet(self):
+        self.validate_identity(
+            "SELECT key, string_column FROM my_table ORDER BY key DESC, LENGTH(string_column) ASC",
+            write_sql=(
+                "SELECT key, string_column FROM `my_table` "
+                "ORDER BY key DESC, Unicode::GetLength(string_column) ASC"
+            ),
+        )
+
+    def test_order_by_doc_rejects_column_sequence_number(self):
+        with self.assertRaises(UnsupportedError):
+            parse_one("SELECT key, string_column FROM my_table ORDER BY 1", dialect="ydb").sql(dialect="ydb")
+
+    def test_limit_offset_doc_limit_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table LIMIT 7",
+            write_sql="SELECT key FROM `my_table` LIMIT 7",
+        )
+
+    def test_limit_offset_doc_limit_offset_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table LIMIT 7 OFFSET 3",
+            write_sql="SELECT key FROM `my_table` LIMIT 7 OFFSET 3",
+        )
+
+    def test_limit_offset_doc_comma_form_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table LIMIT 3, 7",
+            write_sql="SELECT key FROM `my_table` LIMIT 7 OFFSET 3",
+        )
+
+    def test_sample_doc_tablesample_bernoulli_repeatable_snippet(self):
+        self.validate_identity(
+            "SELECT * FROM my_table TABLESAMPLE BERNOULLI(1.0) REPEATABLE(123)",
+            write_sql="SELECT * FROM `my_table` TABLESAMPLE BERNOULLI(1.0) REPEATABLE(123)",
+        )
+
+    def test_sample_doc_tablesample_system_snippet(self):
+        self.validate_identity(
+            "SELECT * FROM my_table TABLESAMPLE SYSTEM(1.0)",
+            write_sql="SELECT * FROM `my_table` TABLESAMPLE SYSTEM(1.0)",
+        )
+
+    def test_sample_doc_sample_fraction_snippet(self):
+        self.validate_identity(
+            "SELECT * FROM my_table SAMPLE 1.0 / 3",
+            write_sql="SELECT * FROM `my_table` SAMPLE 1.0 / 3",
+        )
+
+    def test_match_recognize_doc_usage_snippet(self):
+        sql = (
+            'PRAGMA FeatureR010="prototype"; '
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PARTITION BY device_id, zone_id "
+            "ORDER BY ts "
+            "MEASURES LAST(B1.ts) AS b1, LAST(B3.ts) AS b3 "
+            "ONE ROW PER MATCH "
+            "AFTER MATCH SKIP TO NEXT ROW "
+            "PATTERN (B1 B2+ B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA FeatureR010 = 'prototype';\n"
+            "SELECT * FROM `input` MATCH_RECOGNIZE ("
+            "PARTITION BY device_id, zone_id "
+            "ORDER BY ts "
+            "MEASURES LAST(B1.ts) AS b1, LAST(B3.ts) AS b3 "
+            "ONE ROW PER MATCH "
+            "AFTER MATCH SKIP TO NEXT ROW "
+            "PATTERN (B1 B2+ B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")",
+            generated,
+        )
+
+    def test_match_recognize_doc_pattern_and_define_snippets(self):
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PATTERN (B1 E* B2+ B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ( "
+                "PATTERN (B1 E* B2+ B3) "
+                "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+                ")"
+            ),
+        )
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PATTERN (A B) "
+            "DEFINE A AS A.button = 1 AND LAST(A.zone_id) = 12, "
+            "B AS B.button = 2 AND FIRST(A.zone_id) = 12"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ( "
+                "PATTERN (A B) "
+                "DEFINE A AS A.button = 1 AND LAST(A.zone_id) = 12, "
+                "B AS B.button = 2 AND FIRST(A.zone_id) = 12"
+                ")"
+            ),
+        )
+
+    def test_match_recognize_doc_rows_per_match_and_after_skip_snippets(self):
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "MEASURES FIRST(B1.ts) AS first_ts, FIRST(B2.ts) AS mid_ts, LAST(B3.ts) AS last_ts "
+            "ALL ROWS PER MATCH "
+            "AFTER MATCH SKIP PAST LAST ROW "
+            "PATTERN (B1 {- B2 -} B3) "
+            "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ( "
+                "MEASURES FIRST(B1.ts) AS first_ts, FIRST(B2.ts) AS mid_ts, LAST(B3.ts) AS last_ts "
+                "ALL ROWS PER MATCH "
+                "AFTER MATCH SKIP PAST LAST ROW "
+                "PATTERN (B1 {- B2 -} B3) "
+                "DEFINE B1 AS B1.button = 1, B2 AS B2.button = 2, B3 AS B3.button = 3"
+                ")"
+            ),
+        )
+
+    def test_match_recognize_doc_order_and_partition_snippets(self):
+        self.validate_identity(
+            "SELECT * FROM input MATCH_RECOGNIZE ("
+            "PARTITION BY device_id, zone_id "
+            "ORDER BY CAST(ts AS Timestamp) "
+            "PATTERN (B1) "
+            "DEFINE B1 AS B1.button = 1"
+            ")",
+            write_sql=(
+                "SELECT * FROM `input` MATCH_RECOGNIZE ("
+                "PARTITION BY device_id, zone_id "
+                "ORDER BY CAST(ts AS Timestamp) "
+                "PATTERN (B1) "
+                "DEFINE B1 AS B1.button = 1"
+                ")"
+            ),
+        )
+
+    def test_match_recognize_doc_rejects_unsupported_after_skip_modes(self):
+        with self.assertRaises(UnsupportedError):
+            parse_one(
+                "SELECT * FROM input MATCH_RECOGNIZE ("
+                "AFTER MATCH SKIP TO FIRST B1 "
+                "PATTERN (B1) "
+                "DEFINE B1 AS B1.button = 1"
+                ")",
+                dialect="ydb",
+            ).sql(dialect="ydb")
+
     def test_window_functions(self):
         cases = [
             "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM `table`",
             "SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY id) FROM `table`",
+            "SELECT COUNT(*) OVER w AS rows_count_in_window, some_other_value FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column ORDER BY int_column)",
+            "SELECT LAG(my_column, 2) OVER w AS row_before_previous_one FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column)",
+            "SELECT LAG(my_column, 2) OVER w AS row_before_previous_one FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column ORDER BY my_column)",
+            "SELECT AVG(some_value) OVER w AS avg_of_prev_current_next, some_other_value FROM `my_table` WINDOW w AS (PARTITION BY partition_key_column ORDER BY int_column ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)",
+            "SELECT SUM(x) OVER (PARTITION BY a + b AS c ORDER BY t) FROM `my_table`",
+            "SELECT SUM(x) OVER (PARTITION COMPACT BY key ORDER BY t) FROM `my_table`",
+            "SELECT SUM(x) OVER (PARTITION COMPACT BY () ORDER BY t) FROM `my_table`",
         ]
         for sql in cases:
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
+
+    def test_window_frame_begin_defaults_to_current_row(self):
+        cases = [
+            (
+                "SELECT SUM(x) OVER (ORDER BY t ROWS UNBOUNDED PRECEDING) FROM `my_table`",
+                "SELECT SUM(x) OVER (ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM `my_table`",
+            ),
+            (
+                "SELECT SUM(x) OVER (ORDER BY t ROWS 3 PRECEDING) FROM `my_table`",
+                "SELECT SUM(x) OVER (ORDER BY t ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) FROM `my_table`",
+            ),
+            (
+                "SELECT SUM(x) OVER (ORDER BY t ROWS CURRENT ROW) FROM `my_table`",
+                "SELECT SUM(x) OVER (ORDER BY t ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM `my_table`",
+            ),
+        ]
+        for sql, write_sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql, write_sql=write_sql)
 
     def test_aggregates(self):
         self.validate_identity(
@@ -204,6 +455,28 @@ class TestYDBTransforms(Validator):
             "SELECT * FROM `/db/table` VIEW PRIMARY KEY d",
         )
 
+    def test_secondary_index_doc_select_snippet(self):
+        self.validate_transpile(
+            "SELECT series_id, title, info, release_date, views, uploaded_user_id "
+            "FROM series VIEW views_index WHERE views >= someValue",
+            "SELECT series_id, title, info, release_date, views, uploaded_user_id "
+            "FROM `series` VIEW views_index WHERE views >= someValue",
+        )
+
+    def test_secondary_index_doc_join_snippet(self):
+        self.validate_transpile(
+            "SELECT t1.series_id, t1.title "
+            "FROM series VIEW users_index AS t1 "
+            "INNER JOIN users VIEW name_index AS t2 "
+            "ON t1.uploaded_user_id == t2.user_id "
+            "WHERE t2.name == userName",
+            "SELECT t1.series_id AS series_id, t1.title AS title "
+            "FROM `series` VIEW users_index AS t1 "
+            "INNER JOIN `users` VIEW name_index AS t2 "
+            "ON t1.uploaded_user_id = t2.user_id "
+            "WHERE t2.name = userName",
+        )
+
     def test_table_with_source_options(self):
         sql = (
             "SELECT * FROM `table` WITH ("
@@ -220,6 +493,34 @@ class TestYDBTransforms(Validator):
     def test_table_with_unparenthesized_source_option(self):
         sql = "SELECT * FROM `table` WITH TabletId='tablet-1' WHERE id = 1"
         self.assertEqual(parse_one(sql, dialect="ydb").sql(dialect="ydb"), sql)
+
+    def test_with_doc_infer_schema_snippets(self):
+        self.validate_transpile(
+            "SELECT key FROM my_table WITH INFER_SCHEMA",
+            "SELECT key FROM `my_table` WITH INFER_SCHEMA",
+        )
+        self.validate_transpile(
+            'SELECT key FROM my_table WITH FORCE_INFER_SCHEMA="42"',
+            'SELECT key FROM `my_table` WITH FORCE_INFER_SCHEMA="42"',
+        )
+
+    def test_with_doc_named_expression_xlock_snippet(self):
+        self.validate_identity("$s = (SELECT COUNT(*) FROM `my_table` WITH XLOCK)")
+
+    def test_with_doc_schema_and_columns_snippets(self):
+        self.validate_transpile(
+            "SELECT key, value FROM my_table WITH SCHEMA Struct<key:String, value:Int32>",
+            "SELECT key, value FROM `my_table` WITH SCHEMA Struct<key:String, value:Int32>",
+        )
+        self.validate_transpile(
+            "SELECT key, value FROM my_table WITH COLUMNS Struct<value:Int32?>",
+            "SELECT key, value FROM `my_table` WITH COLUMNS Struct<value:Int32?>",
+        )
+
+    def test_with_doc_each_schema_snippet(self):
+        self.validate_identity(
+            "SELECT key, value FROM EACH($my_tables) WITH SCHEMA Struct<key:String, value:List<Int32>>"
+        )
 
     def test_at_raw_string_literal(self):
         self.assertEqual(
@@ -242,6 +543,24 @@ class TestYDBTransforms(Validator):
         self.assertEqual(
             ydb("SELECT * FROM (select * from b) T"),
             "SELECT * FROM (SELECT * FROM `b`) AS T",
+        )
+
+    def test_distinct_doc_value_snippet(self):
+        self.validate_transpile(
+            "SELECT DISTINCT value FROM my_table",
+            "SELECT DISTINCT value FROM `my_table`",
+        )
+
+    def test_distinct_doc_aggregate_distinct_values(self):
+        self.validate_transpile(
+            "SELECT COUNT(DISTINCT value) AS count FROM my_table",
+            "SELECT COUNT(DISTINCT value) AS count FROM `my_table`",
+        )
+
+    def test_distinct_doc_calculated_value_uses_subquery(self):
+        self.validate_transpile(
+            "SELECT DISTINCT value + 1 AS value FROM my_table",
+            "SELECT DISTINCT value FROM (SELECT value + 1 AS value FROM `my_table`) AS _distinct",
         )
 
     def test_derived_table_join_using_is_not_decorrelated(self):
@@ -593,6 +912,19 @@ class TestYDBParser(Validator):
     dialect = "ydb"
     maxDiff = None
 
+    def assert_roundtrip_stable(self, sql: str) -> None:
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        regenerated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(generated, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(generated, regenerated)
+
     # --- $varname -----------------------------------------------------------
 
     def test_dollar_variable_in_expr(self):
@@ -676,10 +1008,81 @@ class TestYDBParser(Validator):
     def test_flatten_by_multiple_columns(self):
         self.validate_identity("SELECT * FROM `t` FLATTEN BY (a, b)")
 
+    def test_flatten_by_parenthesized_single_column(self):
+        self.validate_identity("SELECT value, id FROM as_table($sample) FLATTEN BY (value)")
+
+    def test_flatten_dict_by_alias_after_table_alias(self):
+        self.validate_identity("SELECT * FROM `my_table` AS t FLATTEN DICT BY dict_column AS item")
+
     def test_flatten_by_named_expression(self):
         self.validate_identity(
             "SELECT * FROM `t` FLATTEN LIST BY (String::SplitToList(a, ';') AS a, b)"
         )
+
+    def test_flatten_page_sample_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """$sample = AsList(
+    AsStruct(AsList('a','b','c') AS value, CAST(1 AS Uint32) AS id),
+    AsStruct(AsList('d') AS value, CAST(2 AS Uint32) AS id),
+    AsStruct(AsList() AS value, CAST(3 AS Uint32) AS id)
+);
+
+SELECT value, id FROM as_table($sample) FLATTEN BY (value);"""
+        )
+
+    def test_flatten_dict_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT
+  t.item.0 AS key,
+  t.item.1 AS value,
+  t.dict_column AS original_dict,
+  t.other_column AS other
+FROM my_table AS t
+FLATTEN DICT BY dict_column AS item;"""
+        )
+
+    def test_flatten_list_multiple_columns_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT * FROM (
+    SELECT
+        AsList(1, 2, 3) AS a,
+        AsList("x", "y", "z") AS b
+) FLATTEN LIST BY (a, b);"""
+        )
+
+    def test_flatten_named_expression_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT * FROM (
+    SELECT
+        "1;2;3" AS a,
+        AsList("x", "y", "z") AS b
+) FLATTEN LIST BY (String::SplitToList(a, ";") as a, b);"""
+        )
+
+    def test_flatten_columns_page_snippet_roundtrip_stable(self):
+        self.assert_roundtrip_stable(
+            """SELECT x, y, z
+FROM (
+  SELECT
+    AsStruct(
+        1 AS x,
+        "foo" AS y),
+    AsStruct(
+        false AS z)
+) FLATTEN COLUMNS;"""
+        )
+
+    def test_flatten_by_multiple_columns_requires_parentheses(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("SELECT * FROM `t` FLATTEN BY a, b")
+
+    def test_flatten_by_arbitrary_expression_requires_alias_and_parentheses(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("SELECT * FROM `t` FLATTEN BY ListSkip(col, 1)")
+
+    def test_flatten_by_parenthesized_arbitrary_expression_requires_alias(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("SELECT * FROM `t` FLATTEN BY (ListSkip(col, 1))")
 
     def test_flatten_columns(self):
         self.validate_identity("SELECT * FROM `t` FLATTEN COLUMNS")
@@ -756,14 +1159,216 @@ class TestYDBParser(Validator):
     def test_assume_order_by_desc(self):
         self.validate_identity("SELECT * FROM `t` ASSUME ORDER BY id DESC")
 
+    def test_assume_order_by_doc_alias_snippet(self):
+        self.validate_identity(
+            'SELECT key || "suffix" AS key, -CAST(subkey AS Int32) AS subkey '
+            "FROM my_table ASSUME ORDER BY key, subkey DESC",
+            write_sql=(
+                "SELECT key || 'suffix' AS key, -CAST(subkey AS Int32) AS subkey "
+                "FROM `my_table` ASSUME ORDER BY key, subkey DESC"
+            ),
+        )
+
+    def test_assume_order_by_doc_rejects_expressions(self):
+        with self.assertRaises(UnsupportedError):
+            parse_one("SELECT key FROM my_table ASSUME ORDER BY key + 1", dialect="ydb").sql(dialect="ydb")
+
     def test_group_compact_by(self):
         self.validate_transpile(
             "SELECT source_id FROM `table` GROUP COMPACT BY source_id",
-            "SELECT source_id FROM `table` GROUP BY source_id AS source_id",
+            "SELECT source_id FROM `table` GROUP COMPACT BY source_id AS source_id",
+        )
+
+    def test_group_by_doc_basic_count_snippet(self):
+        self.validate_transpile(
+            "SELECT key, COUNT(*) FROM my_table GROUP BY key",
+            "SELECT key, COUNT(*) FROM `my_table` GROUP BY key AS key",
+        )
+
+    def test_group_by_doc_expression_alias_snippet(self):
+        self.validate_transpile(
+            "SELECT double_key, COUNT(*) FROM my_table GROUP BY key + key AS double_key",
+            "SELECT double_key, COUNT(*) FROM `my_table` GROUP BY key + key AS double_key",
+        )
+
+    def test_group_by_doc_multiple_aliases_snippet(self):
+        self.assert_roundtrip_stable(
+            """SELECT
+   double_key,
+   COUNT(*) AS group_size,
+   SUM(key + subkey) AS sum1,
+   CAST(SUM(1 + 2) AS String) AS sum2,
+   SUM(SUM(1) + key) AS sum3,
+   key AS k1,
+   key * 2 AS dk1
+FROM my_table
+GROUP BY
+  key * 2 AS double_key,
+  subkey AS sk;"""
+        )
+
+    def test_group_by_doc_session_window_snippet(self):
+        self.validate_transpile(
+            "SELECT user, session_start, SessionStart() AS same_session_start, "
+            "COUNT(*) AS session_size, SUM(value) AS sum_over_session FROM my_table "
+            "GROUP BY user, SessionWindow(ts, timeout) AS session_start",
+            "SELECT user, session_start, SessionStart() AS same_session_start, "
+            "COUNT(*) AS session_size, SUM(value) AS sum_over_session FROM `my_table` "
+            "GROUP BY user AS user, SessionWindow(ts, timeout) AS session_start",
+        )
+
+    def test_group_by_doc_extended_session_window_snippet(self):
+        self.assert_roundtrip_stable(
+            """$max_len = 1000; $timeout = 100;
+$init = ($row) -> (AsTuple($row.ts, $row.ts)); $update = ($row, $state) -> {
+  $is_end_session = $row.ts - $state.0 > $max_len OR $row.ts - $state.1 > $timeout;
+  $new_state = AsTuple(IF($is_end_session, $row.ts, $state.0), $row.ts);
+  return AsTuple($is_end_session, $new_state);
+};
+$calculate = ($row, $state) -> ($row.ts);
+SELECT
+  user,
+  session_start,
+  SessionStart() AS same_session_start,
+  COUNT(*) AS session_size,
+  SUM(value) AS sum_over_session
+FROM my_table
+GROUP BY user, SessionWindow(ts, $init, $update, $calculate) AS session_start;"""
+        )
+
+    def test_group_by_doc_rollup_grouping_sets_snippet(self):
+        self.validate_transpile(
+            "SELECT column1, column2, column3, "
+            "CASE GROUPING(column1, column2, column3) "
+            "WHEN 1 THEN 'Subtotal: column1 and column2' "
+            "WHEN 3 THEN 'Subtotal: column1' "
+            "WHEN 4 THEN 'Subtotal: column2 and column3' "
+            "WHEN 6 THEN 'Subtotal: column3' "
+            "WHEN 7 THEN 'Grand total' "
+            "ELSE 'Individual group' END AS subtotal, "
+            "COUNT(*) AS rows_count FROM my_table "
+            "GROUP BY ROLLUP(column1, column2, column3), "
+            "GROUPING SETS ((column2, column3), (column3))",
+            "SELECT column1, column2, column3, "
+            "CASE GROUPING(column1, column2, column3) "
+            "WHEN 1 THEN 'Subtotal: column1 and column2' "
+            "WHEN 3 THEN 'Subtotal: column1' "
+            "WHEN 4 THEN 'Subtotal: column2 and column3' "
+            "WHEN 6 THEN 'Subtotal: column3' "
+            "WHEN 7 THEN 'Grand total' "
+            "ELSE 'Individual group' END AS subtotal, "
+            "COUNT(*) AS rows_count FROM `my_table` "
+            "GROUP BY ROLLUP (column1, column2, column3), "
+            "GROUPING SETS ((column2, column3), (column3))",
+        )
+
+    def test_group_by_doc_distinct_aggregate_snippet(self):
+        self.validate_transpile(
+            "SELECT key, COUNT(DISTINCT value) AS count FROM my_table "
+            "GROUP BY key ORDER BY count DESC LIMIT 3",
+            "SELECT key, COUNT(DISTINCT value) AS count FROM `my_table` "
+            "GROUP BY key AS key ORDER BY count DESC LIMIT 3",
+        )
+
+    def test_group_by_doc_group_compact_snippet(self):
+        self.validate_transpile(
+            "SELECT key, COUNT(DISTINCT value) AS count FROM my_table "
+            "GROUP COMPACT BY key ORDER BY count DESC LIMIT 3",
+            "SELECT key, COUNT(DISTINCT value) AS count FROM `my_table` "
+            "GROUP COMPACT BY key AS key ORDER BY count DESC LIMIT 3",
+        )
+
+    def test_group_by_doc_having_snippet(self):
+        self.validate_transpile(
+            "SELECT key FROM my_table GROUP BY key HAVING COUNT(value) > 100",
+            "SELECT key FROM `my_table` GROUP BY key AS key HAVING COUNT(value) > 100",
         )
 
     def test_left_only_join(self):
         self.validate_identity("SELECT * FROM `a` LEFT ONLY JOIN `b` USING (id)")
+
+    def test_join_doc_default_inner_join_type(self):
+        self.validate_identity("SELECT * FROM `a` JOIN `b` ON a.id = b.id")
+
+    def test_join_doc_join_types(self):
+        cases = [
+            "SELECT * FROM `a` LEFT JOIN `b` USING (key)",
+            "SELECT * FROM `a` RIGHT JOIN `b` USING (key)",
+            "SELECT * FROM `a` FULL JOIN `b` USING (key)",
+            "SELECT * FROM `a` LEFT SEMI JOIN `b` USING (key)",
+            "SELECT * FROM `a` RIGHT SEMI JOIN `b` USING (key)",
+            "SELECT * FROM `a` LEFT ONLY JOIN `b` USING (key)",
+            "SELECT * FROM `a` RIGHT ONLY JOIN `b` USING (key)",
+            "SELECT * FROM `a` CROSS JOIN `b`",
+            "SELECT * FROM `a` EXCLUSION JOIN `b` USING (key)",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
+    def test_join_doc_full_join_using_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM a_table AS a FULL JOIN b_table AS b USING (key)",
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM `a_table` AS a FULL JOIN `b_table` AS b USING (key)",
+        )
+
+    def test_join_doc_full_join_on_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM a_table AS a FULL JOIN b_table AS b ON a.key = b.key",
+            "SELECT a.value AS a_value, b.value AS b_value "
+            "FROM `a_table` AS a FULL JOIN `b_table` AS b ON a.key = b.key",
+        )
+
+    def test_join_doc_cross_then_left_join_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value, c.column2 "
+            "FROM a_table AS a CROSS JOIN b_table AS b "
+            "LEFT JOIN c_table AS c ON c.ref = a.key AND c.column1 = b.value",
+            "SELECT a.value AS a_value, b.value AS b_value, c.column2 AS column2 "
+            "FROM `a_table` AS a CROSS JOIN `b_table` AS b "
+            "LEFT JOIN `c_table` AS c ON c.ref = a.key AND c.column1 = b.value",
+        )
+
+    def test_join_doc_index_lookup_join_snippet(self):
+        self.validate_transpile(
+            "SELECT a.value AS a_value, b.value AS b_value FROM a_table AS a "
+            "INNER JOIN b_table VIEW b_index_ref AS b ON a.ref = b.ref",
+            "SELECT a.value AS a_value, b.value AS b_value FROM `a_table` AS a "
+            "INNER JOIN `b_table` VIEW b_index_ref AS b ON a.ref = b.ref",
+        )
+
+    def test_join_doc_on_allows_equality_over_expressions(self):
+        self.validate_transpile(
+            "SELECT * FROM a JOIN b ON a.key + 1 = b.key",
+            "SELECT * FROM `a` JOIN `b` ON a.key + 1 = b.key",
+        )
+
+    def test_join_doc_on_moves_non_equality_to_where(self):
+        self.validate_transpile(
+            "SELECT * FROM a LEFT JOIN b ON a.id = b.id AND b.value > 0",
+            "SELECT * FROM `a` LEFT JOIN `b` ON a.id = b.id WHERE b.value > 0",
+        )
+
+    def test_exclusion_join(self):
+        self.validate_identity("SELECT t.* FROM $t AS t EXCLUSION JOIN `m` AS m ON t.id = m.id")
+
+    def test_named_select_with_exclusion_join(self):
+        expressions = parse(
+            "$t = SELECT * FROM `table_1` WHERE source_event_type != 'delete';\n"
+            "SELECT t.* FROM $t AS t EXCLUSION JOIN `table_2` AS m "
+            "ON t.iam_authorized_key_id = m.iam_authorized_key_id",
+            dialect="ydb",
+        )
+        generated = ";\n".join(expression.sql(dialect="ydb") for expression in expressions if expression)
+        self.assertEqual(
+            generated,
+            "$t = (SELECT * FROM `table_1` WHERE source_event_type <> 'delete');\n\n"
+            "SELECT t.* FROM $t AS t EXCLUSION JOIN `table_2` AS m "
+            "ON t.iam_authorized_key_id = m.iam_authorized_key_id",
+        )
 
     def test_without_projection_after_table_star(self):
         self.validate_transpile(
@@ -966,6 +1571,12 @@ class TestYDBAdvancedSyntax(Validator):
     def test_utf8_string_literal_suffix(self):
         self.validate_identity("SELECT 'value'u AS value")
 
+    def test_json_string_literal_suffix(self):
+        self.validate_identity(
+            "SELECT options ?? '[]'j AS options FROM `zones`",
+            write_sql="SELECT COALESCE(options, '[]'j) AS options FROM `zones`",
+        )
+
     def test_json_value_returning_type(self):
         self.validate_identity(
             "SELECT JSON_VALUE(payload, '$.size' RETURNING Int64) AS size FROM `events`"
@@ -1052,6 +1663,22 @@ class TestYDBAdvancedSyntax(Validator):
             "LEFT JOIN $user_likes AS ul ON ul.post_id = p.id\n"
             "WHERE p.id = $id"
         )
+
+    def test_named_query_with_group_by_roundtrip_does_not_generate_empty_with(self):
+        sql = (
+            "$recent_failed_tests_d = SELECT DISTINCT join_key FROM `failed`;\n"
+            "SELECT pta.folder_name AS folder_name, "
+            "SUM(CASE WHEN status LIKE 'FAILED' THEN 1 ELSE 0 END) AS status "
+            "FROM `tests` AS pta "
+            "INNER JOIN $recent_failed_tests_d AS ot ON pta.join_key = ot.join_key "
+            "WHERE status LIKE 'FAILED' "
+            "GROUP BY pta.folder_name, pta.status "
+            "HAVING SUM(CASE WHEN status LIKE 'FAILED' THEN 1 ELSE 0 END) > 0 "
+            "ORDER BY status DESC LIMIT 20 OFFSET 0"
+        )
+        generated = parse_one(sql, dialect="ydb").sql(dialect="ydb")
+        self.assertNotIn("WITH  SELECT", generated)
+        parse_one(generated, dialect="ydb")
 
     def test_table_valued_function_roundtrip_stable(self):
         self.validate_identity("SELECT * FROM AS_TABLE($Input) AS k")
