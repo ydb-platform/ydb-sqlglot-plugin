@@ -204,6 +204,25 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_where_doc_filter_snippet(self):
+        self.validate_identity(
+            "SELECT key FROM my_table WHERE value > 0",
+            write_sql="SELECT key FROM `my_table` WHERE value > 0",
+        )
+
+    def test_order_by_doc_sorting_criteria_snippet(self):
+        self.validate_identity(
+            "SELECT key, string_column FROM my_table ORDER BY key DESC, LENGTH(string_column) ASC",
+            write_sql=(
+                "SELECT key, string_column FROM `my_table` "
+                "ORDER BY key DESC, Unicode::GetLength(string_column) ASC"
+            ),
+        )
+
+    def test_order_by_doc_rejects_column_sequence_number(self):
+        with self.assertRaises(UnsupportedError):
+            parse_one("SELECT key, string_column FROM my_table ORDER BY 1", dialect="ydb").sql(dialect="ydb")
+
     def test_window_functions(self):
         cases = [
             "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM `table`",
@@ -994,6 +1013,20 @@ FROM (
 
     def test_assume_order_by_desc(self):
         self.validate_identity("SELECT * FROM `t` ASSUME ORDER BY id DESC")
+
+    def test_assume_order_by_doc_alias_snippet(self):
+        self.validate_identity(
+            'SELECT key || "suffix" AS key, -CAST(subkey AS Int32) AS subkey '
+            "FROM my_table ASSUME ORDER BY key, subkey DESC",
+            write_sql=(
+                "SELECT key || 'suffix' AS key, -CAST(subkey AS Int32) AS subkey "
+                "FROM `my_table` ASSUME ORDER BY key, subkey DESC"
+            ),
+        )
+
+    def test_assume_order_by_doc_rejects_expressions(self):
+        with self.assertRaises(UnsupportedError):
+            parse_one("SELECT key FROM my_table ASSUME ORDER BY key + 1", dialect="ydb").sql(dialect="ydb")
 
     def test_group_compact_by(self):
         self.validate_transpile(

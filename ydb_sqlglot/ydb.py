@@ -2013,6 +2013,12 @@ class YDB(Dialect):
             return f"{table} FLATTEN COLUMNS"
 
         def assumeorderby_sql(self, expression: AssumeOrderBy) -> str:
+            order_expr = expression.args.get("this")
+            if isinstance(order_expr, exp.Order):
+                for ordered in order_expr.expressions:
+                    item = ordered.this if isinstance(ordered, exp.Ordered) else ordered
+                    if not isinstance(item, (exp.Column, exp.Identifier)):
+                        raise UnsupportedError("YDB ASSUME ORDER BY does not support expressions")
             order = self.sql(expression, "this").lstrip()
             return self.seg(f"ASSUME {order}")
 
@@ -4041,6 +4047,11 @@ class YDB(Dialect):
 
         def _order_sql(self, expression: exp.Order) -> str:
             """Generate ORDER BY using alias references."""
+            for ordered in expression.expressions:
+                order_expr = ordered.this if isinstance(ordered, exp.Ordered) else ordered
+                if isinstance(order_expr, exp.Literal) and not order_expr.is_string:
+                    raise UnsupportedError("YDB does not support ORDER BY column sequence number")
+
             select_stmt = expression.find_ancestor(exp.Select)
 
             if not select_stmt:
