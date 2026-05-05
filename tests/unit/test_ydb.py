@@ -843,7 +843,112 @@ FROM (
     def test_group_compact_by(self):
         self.validate_transpile(
             "SELECT source_id FROM `table` GROUP COMPACT BY source_id",
-            "SELECT source_id FROM `table` GROUP BY source_id AS source_id",
+            "SELECT source_id FROM `table` GROUP COMPACT BY source_id AS source_id",
+        )
+
+    def test_group_by_doc_basic_count_snippet(self):
+        self.validate_transpile(
+            "SELECT key, COUNT(*) FROM my_table GROUP BY key",
+            "SELECT key, COUNT(*) FROM `my_table` GROUP BY key AS key",
+        )
+
+    def test_group_by_doc_expression_alias_snippet(self):
+        self.validate_transpile(
+            "SELECT double_key, COUNT(*) FROM my_table GROUP BY key + key AS double_key",
+            "SELECT double_key, COUNT(*) FROM `my_table` GROUP BY key + key AS double_key",
+        )
+
+    def test_group_by_doc_multiple_aliases_snippet(self):
+        self.assert_roundtrip_stable(
+            """SELECT
+   double_key,
+   COUNT(*) AS group_size,
+   SUM(key + subkey) AS sum1,
+   CAST(SUM(1 + 2) AS String) AS sum2,
+   SUM(SUM(1) + key) AS sum3,
+   key AS k1,
+   key * 2 AS dk1
+FROM my_table
+GROUP BY
+  key * 2 AS double_key,
+  subkey AS sk;"""
+        )
+
+    def test_group_by_doc_session_window_snippet(self):
+        self.validate_transpile(
+            "SELECT user, session_start, SessionStart() AS same_session_start, "
+            "COUNT(*) AS session_size, SUM(value) AS sum_over_session FROM my_table "
+            "GROUP BY user, SessionWindow(ts, timeout) AS session_start",
+            "SELECT user, session_start, SessionStart() AS same_session_start, "
+            "COUNT(*) AS session_size, SUM(value) AS sum_over_session FROM `my_table` "
+            "GROUP BY user AS user, SessionWindow(ts, timeout) AS session_start",
+        )
+
+    def test_group_by_doc_extended_session_window_snippet(self):
+        self.assert_roundtrip_stable(
+            """$max_len = 1000; $timeout = 100;
+$init = ($row) -> (AsTuple($row.ts, $row.ts)); $update = ($row, $state) -> {
+  $is_end_session = $row.ts - $state.0 > $max_len OR $row.ts - $state.1 > $timeout;
+  $new_state = AsTuple(IF($is_end_session, $row.ts, $state.0), $row.ts);
+  return AsTuple($is_end_session, $new_state);
+};
+$calculate = ($row, $state) -> ($row.ts);
+SELECT
+  user,
+  session_start,
+  SessionStart() AS same_session_start,
+  COUNT(*) AS session_size,
+  SUM(value) AS sum_over_session
+FROM my_table
+GROUP BY user, SessionWindow(ts, $init, $update, $calculate) AS session_start;"""
+        )
+
+    def test_group_by_doc_rollup_grouping_sets_snippet(self):
+        self.validate_transpile(
+            "SELECT column1, column2, column3, "
+            "CASE GROUPING(column1, column2, column3) "
+            "WHEN 1 THEN 'Subtotal: column1 and column2' "
+            "WHEN 3 THEN 'Subtotal: column1' "
+            "WHEN 4 THEN 'Subtotal: column2 and column3' "
+            "WHEN 6 THEN 'Subtotal: column3' "
+            "WHEN 7 THEN 'Grand total' "
+            "ELSE 'Individual group' END AS subtotal, "
+            "COUNT(*) AS rows_count FROM my_table "
+            "GROUP BY ROLLUP(column1, column2, column3), "
+            "GROUPING SETS ((column2, column3), (column3))",
+            "SELECT column1, column2, column3, "
+            "CASE GROUPING(column1, column2, column3) "
+            "WHEN 1 THEN 'Subtotal: column1 and column2' "
+            "WHEN 3 THEN 'Subtotal: column1' "
+            "WHEN 4 THEN 'Subtotal: column2 and column3' "
+            "WHEN 6 THEN 'Subtotal: column3' "
+            "WHEN 7 THEN 'Grand total' "
+            "ELSE 'Individual group' END AS subtotal, "
+            "COUNT(*) AS rows_count FROM `my_table` "
+            "GROUP BY ROLLUP (column1, column2, column3), "
+            "GROUPING SETS ((column2, column3), (column3))",
+        )
+
+    def test_group_by_doc_distinct_aggregate_snippet(self):
+        self.validate_transpile(
+            "SELECT key, COUNT(DISTINCT value) AS count FROM my_table "
+            "GROUP BY key ORDER BY count DESC LIMIT 3",
+            "SELECT key, COUNT(DISTINCT value) AS count FROM `my_table` "
+            "GROUP BY key AS key ORDER BY count DESC LIMIT 3",
+        )
+
+    def test_group_by_doc_group_compact_snippet(self):
+        self.validate_transpile(
+            "SELECT key, COUNT(DISTINCT value) AS count FROM my_table "
+            "GROUP COMPACT BY key ORDER BY count DESC LIMIT 3",
+            "SELECT key, COUNT(DISTINCT value) AS count FROM `my_table` "
+            "GROUP COMPACT BY key AS key ORDER BY count DESC LIMIT 3",
+        )
+
+    def test_group_by_doc_having_snippet(self):
+        self.validate_transpile(
+            "SELECT key FROM my_table GROUP BY key HAVING COUNT(value) > 100",
+            "SELECT key FROM `my_table` GROUP BY key AS key HAVING COUNT(value) > 100",
         )
 
     def test_left_only_join(self):

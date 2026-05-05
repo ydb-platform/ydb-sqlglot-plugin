@@ -161,7 +161,7 @@ def _wrap_udf_group_by(expression: exp.Expression) -> None:
     Mutates the tree in-place (replaces the Select node).
     """
     def _is_trivial(e: exp.Expression) -> bool:
-        return isinstance(e, (exp.Column, exp.Identifier))
+        return isinstance(e, (exp.Alias, exp.Column, exp.Identifier))
 
     for select in list(expression.find_all(exp.Select)):
         group = select.args.get("group")
@@ -178,7 +178,7 @@ def _wrap_udf_group_by(expression: exp.Expression) -> None:
         # (expand alias references to the aliased expression).
         def _effective(e: exp.Expression) -> exp.Expression:
             if isinstance(e, exp.Alias):
-                return e.this
+                return e
             if isinstance(e, exp.Column):
                 name = e.name
                 if name in alias_to_expr:
@@ -1335,6 +1335,7 @@ class YDB(Dialect):
             comments = self._prev_comments
 
             elements: dict[str, t.Any] = defaultdict(list)
+            compact = bool(self._prev and "COMPACT" in self._prev.text.upper())
 
             if self._match(TokenType.ALL):
                 elements["all"] = True
@@ -1372,7 +1373,10 @@ class YDB(Dialect):
                 if index == self._index:
                     break
 
-            return self.expression(exp.Group(**elements), comments=comments)
+            group = self.expression(exp.Group(**elements), comments=comments)
+            if compact:
+                group.meta["compact"] = True
+            return group
 
         def _parse_expressions(self) -> t.List[exp.Expression]:
             expressions = []
@@ -3746,10 +3750,11 @@ class YDB(Dialect):
         def _group_by(self, expression: exp.Group) -> str:
             """Generate GROUP BY using alias references."""
             select_stmt = expression.find_ancestor(exp.Select)
+            group_by_prefix = " GROUP COMPACT BY" if expression.meta.get("compact") else " GROUP BY"
 
             if not select_stmt:
                 group_by_items = ", ".join(self.sql(e) for e in expression.expressions)
-                return f" GROUP BY {group_by_items}" if group_by_items else " GROUP BY"
+                return f"{group_by_prefix} {group_by_items}" if group_by_items else group_by_prefix
 
             # If the SELECT's FROM is a subquery, the alias columns are already materialised
             # there — do NOT expand alias references in GROUP BY.
@@ -3794,22 +3799,20 @@ class YDB(Dialect):
             rollup = self.expressions(expression, key="rollup")
             cube = self.expressions(expression, key="cube")
             grouping_sets = self.expressions(expression, key="grouping_sets")
+            extensions = [extension for extension in (rollup, cube, grouping_sets) if extension]
 
             # Build the GROUP BY clause
             if group_by_items:
-                result = f" GROUP BY {group_by_items}"
-            elif not (rollup or cube or grouping_sets):
+                result = f"{group_by_prefix} {group_by_items}"
+            elif not extensions:
                 return ""
             else:
-                result = " GROUP BY"
+                result = group_by_prefix
 
             # Add ROLLUP, CUBE, or GROUPING SETS
-            if rollup:
-                result += f" {rollup}"
-            elif cube:
-                result += f" {cube}"
-            elif grouping_sets:
-                result += f" {grouping_sets}"
+            if extensions:
+                separator = ", " if group_by_items else " "
+                result += f"{separator}{', '.join(extensions)}"
 
             return result
 
