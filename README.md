@@ -113,17 +113,26 @@ The plugin parses YDB/YQL back into sqlglot's AST, enabling round-trips, YDB-to-
 | `$variable` references | `SELECT * FROM $t AS t` |
 | `Module::Function()` | `DateTime::GetYear(ts)` |
 | `DECLARE $p AS Type` | `DECLARE $p AS Int32` |
-| `FLATTEN [LIST\|DICT] BY col` | `FROM t FLATTEN LIST BY col` |
+| `FLATTEN [LIST\|DICT\|OPTIONAL] BY ...` / `FLATTEN COLUMNS` | `FROM t FLATTEN LIST BY col AS item`, `FROM t FLATTEN BY (a, b)`, `FROM t FLATTEN COLUMNS` |
 | `Optional<T>` / `T?` | `CAST(x AS Optional<Utf8>)` |
 | Container types | `CAST(x AS List<Int32>)`, `Dict<Utf8, Int64>`, `Set<Utf8>`, `Tuple<Int32, Utf8>` |
 | `ASSUME ORDER BY` | `SELECT * FROM t ASSUME ORDER BY id` |
-| `GROUP BY expr AS alias` | `SELECT v, COUNT(*) FROM t GROUP BY v AS v` |
+| `GROUP BY expr AS alias` / `GROUP COMPACT BY` | `SELECT v, COUNT(*) FROM t GROUP BY v AS v` |
+| `LEFT ONLY JOIN` | `SELECT * FROM a LEFT ONLY JOIN b USING (id)` |
+| `* WITHOUT (...)` projections | `SELECT b.* WITHOUT (b.id) FROM t AS b` |
 | Named expressions | `$t = (SELECT 1 AS x)` |
 | Lambda expressions | `($x, $y?) -> ($x + COALESCE($y, 0))`, `($y) -> { $p = "x"; RETURN $p \|\| $y }` |
+| YQL struct literals | `AsList(<|user_id: "u1", description: NULL|>)` |
 | `IN COMPACT` | `WHERE key IN COMPACT $values` |
 | `PRAGMA` | `PRAGMA AnsiImplicitCrossJoin` |
+| Table-valued functions | `SELECT * FROM AS_TABLE($Input) AS k` |
+| Table source options and index views | ``FROM `t` WITH TabletId='...'``, ``FROM `t` VIEW PRIMARY KEY v`` |
+| Function-valued expressions | `$grep(x)`, `DateTime::Format("%Y-%m-%d")(ts)`, `Interval("P7D")` |
 
 Table names without backticks are accepted on input; the generator always produces backtick-quoted output.
+
+The parser also tolerates case variants that appear in real YQL dumps, such as
+`set<Utf8>`, `Tuple<Int32, Utf8>?`, and lowercase `return` in lambda blocks.
 
 #### CTEs reassembly
 
@@ -180,6 +189,7 @@ Functions below are recognized by sqlglot as standard SQL expressions and transl
 | `INTERVAL n HOUR` (literal) | `DateTime::IntervalFromHours(n)` |
 | `INTERVAL n MINUTE` (literal) | `DateTime::IntervalFromMinutes(n)` |
 | `INTERVAL n SECOND` (literal) | `DateTime::IntervalFromSeconds(n)` |
+| `Interval("P7D")` (YQL input) | passed through unchanged |
 | `dateDiff('minute', a, b)` | `(CAST(b AS Int64) - CAST(a AS Int64)) / 60000000` |
 | `dateDiff('hour', a, b)` | `(CAST(b AS Int64) - CAST(a AS Int64)) / 3600000000` |
 | `dateDiff('day', a, b)` | `(CAST(b AS Int64) - CAST(a AS Int64)) / 86400000000` |
@@ -229,6 +239,10 @@ arguments and block bodies with local named expressions:
 ($y) -> { $prefix = "x"; RETURN $prefix || $y; };
 ```
 
+ClickHouse `ARRAY JOIN` and simple `arrayJoin(...)` projections, and PostgreSQL
+`LATERAL unnest(...)`, are converted to YDB `FLATTEN BY` when the operation is
+directly tied to the source table.
+
 ### Conditional / math
 
 | Input | YQL output |
@@ -242,6 +256,18 @@ arguments and block bodies with local named expressions:
 | Input | YQL output |
 |---|---|
 | `jsonb_col @> value` (PostgreSQL) | `Yson::Contains(jsonb_col, value)` |
+
+YDB JSON functions are parsed and round-tripped, including `PASSING`,
+`RETURNING`, wrapper modes, and `ON EMPTY` / `ON ERROR` clauses:
+
+```sql
+JSON_VALUE(payload, '$.value + $delta' PASSING 1 AS delta RETURNING Int64 DEFAULT 0 ON EMPTY ERROR ON ERROR)
+JSON_QUERY(payload, '$.items' WITH CONDITIONAL ARRAY WRAPPER NULL ON EMPTY ERROR ON ERROR)
+JSON_EXISTS(payload, '$.items[$Index]' PASSING 0 AS "Index" FALSE ON ERROR)
+```
+
+JSON paths can contain quoted keys, for example
+`JSON_EXISTS(item_result, "$.'P_008 device playback test'")`.
 
 ---
 

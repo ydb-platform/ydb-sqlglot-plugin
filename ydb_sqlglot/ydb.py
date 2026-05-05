@@ -432,6 +432,11 @@ class YdbAtString(exp.Expression):
     arg_types = {"this": True}
 
 
+class YdbStructLiteral(exp.Expression):
+    """YDB struct literal, e.g. <|key: value, ...|>."""
+    arg_types = {"expressions": False}
+
+
 class YdbPostfixCall(exp.Expression):
     """YDB call of an expression result, e.g. $grep(x) or DateTime::Format(fmt)(ts)."""
     arg_types = {"this": True, "expressions": False}
@@ -684,6 +689,14 @@ class YDB(Dialect):
         def parse(self, raw_tokens, sql=None):
             self.reset()
             self.sql = sql or ""
+            raw_tokens = [
+                token
+                for token in raw_tokens
+                if not (
+                    token.token_type == TokenType.VAR
+                    and token.text in ("\ufeff", "ï»¿")
+                )
+            ]
 
             chunks: t.List[t.List[tokens.Token]] = [[]]
             brace_depth = 0
@@ -1123,6 +1136,24 @@ class YDB(Dialect):
                 fallback_to_identifier=fallback_to_identifier,
             )
 
+        def _parse_interval(self, require_interval: bool = True) -> t.Optional[exp.Expression]:
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.INTERVAL
+                and self._next
+                and self._next.token_type == TokenType.L_PAREN
+            ):
+                self._advance()
+                self._match(TokenType.L_PAREN)
+                args = self._parse_csv(self._parse_assignment)
+                self._match_r_paren()
+                return self.expression(exp.Anonymous(this="Interval", expressions=args))
+
+            try:
+                return super()._parse_interval(require_interval=require_interval)
+            except TypeError:
+                return super()._parse_interval()
+
         def _parse_ydb_postfix_calls(
             self,
             expression: t.Optional[exp.Expression],
@@ -1469,6 +1500,14 @@ class YDB(Dialect):
         def _parse_primary(self) -> t.Optional[exp.Expression]:
             if (
                 self._curr
+                and self._curr.token_type == TokenType.LT
+                and self._next
+                and self._next.token_type == TokenType.PIPE
+            ):
+                return self._parse_ydb_struct_literal()
+
+            if (
+                self._curr
                 and self._curr.token_type == TokenType.PARAMETER
                 and self._next
                 and self._next.token_type == TokenType.PARAMETER
@@ -1533,6 +1572,31 @@ class YDB(Dialect):
                 return this
             return super()._parse_primary()
 
+        def _parse_ydb_struct_literal(self) -> YdbStructLiteral:
+            self._advance()  # <
+            self._advance()  # |
+            fields = self._parse_csv(self._parse_ydb_struct_literal_field)
+            self._match(TokenType.PIPE_GT)
+            return self.expression(
+                YdbStructLiteral(expressions=[field for field in fields if field])
+            )
+
+        def _parse_ydb_struct_literal_field(self) -> t.Optional[exp.Expression]:
+            if self._curr and self._curr.token_type == TokenType.PIPE_GT:
+                return None
+
+            key = self._parse_id_var(any_token=True)
+            if not key:
+                self.raise_error("Expected struct literal key")
+            if not self._match(TokenType.COLON):
+                self.raise_error("Expected colon after struct literal key")
+
+            value = self._parse_assignment()
+            if not value:
+                self.raise_error("Expected struct literal value")
+
+            return self.expression(exp.PropertyEQ(this=key, expression=value))
+
         def _next_matching_rparen_is_arrow(self) -> bool:
             depth = 1
             # _tokens_size is not available in all supported sqlglot versions.
@@ -1586,7 +1650,7 @@ class YDB(Dialect):
             assignments = []
 
             if has_brace:
-                while self._curr and self._curr.text != "RETURN":
+                while self._curr and self._curr.text.upper() != "RETURN":
                     index = self._index
                     if self._curr.token_type != TokenType.PARAMETER:
                         self.raise_error("Expected lambda body assignment or RETURN after '->'")
@@ -1796,6 +1860,12 @@ class YDB(Dialect):
 
         def ydbatstring_sql(self, expression: YdbAtString) -> str:
             return f"@@{expression.this}@@"
+
+        def ydbstructliteral_sql(self, expression: YdbStructLiteral) -> str:
+            fields = []
+            for field in expression.expressions:
+                fields.append(f"{self.sql(field, 'this')}: {self.sql(field, 'expression')}")
+            return f"<|{', '.join(fields)}|>"
 
         def ydbpostfixcall_sql(self, expression: YdbPostfixCall) -> str:
             this = self.sql(expression, "this")
@@ -3815,6 +3885,7 @@ class YDB(Dialect):
             AssumeOrderBy: lambda self, e: self.assumeorderby_sql(e),
             YdbTuple: lambda self, e: self.ydbtuple_sql(e),
             YdbAtString: lambda self, e: self.ydbatstring_sql(e),
+            YdbStructLiteral: lambda self, e: self.ydbstructliteral_sql(e),
             YdbPostfixCall: lambda self, e: self.ydbpostfixcall_sql(e),
             YdbJsonExists: lambda self, e: self.ydbjsonexists_sql(e),
             YdbJsonQuery: lambda self, e: self.ydbjsonquery_sql(e),
