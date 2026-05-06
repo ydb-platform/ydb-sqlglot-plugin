@@ -80,6 +80,11 @@ def _replace(expression, condition):
 
 _DATE_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _agg_alias_seq = iter(range(10_000))
+_YDB_STRING_SUFFIXES = {"s", "u", "y", "j"}
+_YDB_INTEGER_SUFFIXES = {"l", "s", "t", "u", "ul", "us", "ut", "lu"}
+_YDB_FLOAT_SUFFIXES = {"f"}
+_YDB_NUMBER_SUFFIXES = _YDB_INTEGER_SUFFIXES | _YDB_FLOAT_SUFFIXES
+_YDB_INTEGER_PREFIXES = ("x", "o", "b")
 
 
 def _alias_order_by_aggregates(expression: exp.Expression) -> None:
@@ -641,6 +646,7 @@ class YDB(Dialect):
         STRING_ESCAPES = ["'", '"', "\\"]
         COMMENTS = ["--", ("/*", "*/")]
         IDENTIFIERS = ["`"]
+        IDENTIFIER_ESCAPES = ["\\"]
 
     class Parser(parser.Parser):
         COLUMN_OPERATORS = {
@@ -860,7 +866,7 @@ class YDB(Dialect):
             if (
                 self._curr
                 and self._curr.token_type == TokenType.VAR
-                and self._curr.text.lower() in ("u", "j")
+                and self._curr.text.lower() in _YDB_STRING_SUFFIXES
                 and token.end + 1 == self._curr.start
             ):
                 literal.meta["ydb_string_suffix"] = self._curr.text
@@ -873,7 +879,7 @@ class YDB(Dialect):
                 text == "0"
                 and self._curr
                 and self._curr.token_type == TokenType.VAR
-                and self._curr.text.lower().startswith("x")
+                and self._curr.text.lower().startswith(_YDB_INTEGER_PREFIXES)
                 and token.end + 1 == self._curr.start
             ):
                 text += self._curr.text
@@ -881,7 +887,7 @@ class YDB(Dialect):
             elif (
                 self._curr
                 and self._curr.token_type == TokenType.VAR
-                and self._curr.text.lower() in ("u", "l", "ul", "lu")
+                and self._curr.text.lower() in _YDB_NUMBER_SUFFIXES
                 and token.end + 1 == self._curr.start
             ):
                 text += self._curr.text
@@ -898,7 +904,7 @@ class YDB(Dialect):
                 if (
                     isinstance(literal, exp.Literal)
                     and not literal.is_string
-                    and lower_suffix in ("u", "l", "ul", "lu")
+                    and lower_suffix in _YDB_NUMBER_SUFFIXES
                     and literal.meta.get("end") is not None
                     and alias
                     and alias.meta.get("start") is not None
@@ -924,8 +930,8 @@ class YDB(Dialect):
                 isinstance(literal, exp.Literal)
                 and not literal.is_string
                 and (
-                    (literal.this == "0" and lower_suffix.startswith("x"))
-                    or lower_suffix in ("u", "l", "ul", "lu")
+                    (literal.this == "0" and lower_suffix.startswith(_YDB_INTEGER_PREFIXES))
+                    or lower_suffix in _YDB_NUMBER_SUFFIXES
                 )
                 and literal.meta.get("end") is not None
                 and literal.meta["end"] + 1 == self._curr.start
@@ -1784,6 +1790,38 @@ class YDB(Dialect):
             return False
 
         def _parse_at_raw_string(self) -> YdbAtString:
+            start = self._curr.start
+            raw_sql = self.sql or ""
+
+            if raw_sql and start is not None:
+                i = start + 2
+                parts = []
+
+                while i < len(raw_sql):
+                    if raw_sql.startswith("@@@@", i):
+                        parts.append("@@@@")
+                        i += 4
+                        continue
+
+                    if raw_sql.startswith("@@", i):
+                        closing_end = i + 1
+                        while self._curr and self._curr.start <= closing_end:
+                            self._advance()
+
+                        literal = self.expression(YdbAtString(this="".join(parts)))
+                        if (
+                            self._curr
+                            and self._curr.token_type == TokenType.VAR
+                            and self._curr.text.lower() in _YDB_STRING_SUFFIXES
+                            and closing_end + 1 == self._curr.start
+                        ):
+                            literal.meta["ydb_string_suffix"] = self._curr.text
+                            self._advance()
+                        return literal
+
+                    parts.append(raw_sql[i])
+                    i += 1
+
             self._advance()
             self._advance()
 
@@ -1801,7 +1839,15 @@ class YDB(Dialect):
                 parts.append(self._curr.text)
                 self._advance()
 
-            return self.expression(YdbAtString(this="".join(parts)))
+            literal = self.expression(YdbAtString(this="".join(parts)))
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.VAR
+                and self._curr.text.lower() in _YDB_STRING_SUFFIXES
+            ):
+                literal.meta["ydb_string_suffix"] = self._curr.text
+                self._advance()
+            return literal
 
         def _parse_lambda_body(self, params):
             if (
@@ -2063,7 +2109,8 @@ class YDB(Dialect):
             return f"Optional<{sql}>" if expression.args.get("nullable") else sql
 
         def ydbatstring_sql(self, expression: YdbAtString) -> str:
-            return f"@@{expression.this}@@"
+            suffix = expression.meta.get("ydb_string_suffix") or ""
+            return f"@@{expression.this}@@{suffix}"
 
         def ydbstructliteral_sql(self, expression: YdbStructLiteral) -> str:
             fields = []

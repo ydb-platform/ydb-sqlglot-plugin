@@ -1476,6 +1476,96 @@ GROUP BY user, SessionWindow(ts, $init, $update, $calculate) AS session_start;""
             "--!syntax_v1\nPRAGMA TablePathPrefix = '/db/name'",
         )
 
+    # --- Lexical structure --------------------------------------------------
+
+    def test_lexer_doc_comments_are_whitespace(self):
+        sql = "SELECT 1; -- A single-line comment\n/* Some multi-line comment */ SELECT 2"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "SELECT 1;\n /* A single-line comment */;\n/* Some multi-line comment */ SELECT 2",
+            generated,
+        )
+
+    def test_lexer_doc_identifiers(self):
+        self.validate_identity(
+            "SELECT my_column FROM my_table",
+            write_sql="SELECT my_column FROM `my_table`",
+        )
+        self.validate_identity(
+            "SELECT `column with space` from T",
+            write_sql="SELECT `column with space` FROM `T`",
+        )
+        self.validate_identity("SELECT * FROM `my_dir/my_table`")
+        self.validate_identity(
+            "SELECT `select` FROM T",
+            write_sql="SELECT `select` FROM `T`",
+        )
+
+    def test_lexer_doc_backtick_identifier_escapes(self):
+        self.validate_identity(
+            "SELECT 1 as `column with\\n newline, \\x0a newline and \\` backtick `",
+            write_sql="SELECT 1 AS `column with\n newline, \\x0a newline and `` backtick `",
+        )
+
+    def test_lexer_doc_ansi_double_quoted_identifier(self):
+        self.validate_identity(
+            '--!ansi_lexer\nSELECT 1 as "column with "" double quote"',
+            write_sql='--!ansi_lexer\nSELECT 1 AS `column with " double quote`',
+        )
+
+    def test_lexer_doc_string_literals(self):
+        self.validate_identity(
+            "SELECT 'string with\\n newline, \\x0a newline and \\' backtick '",
+            write_sql="SELECT 'string with\\n newline, \\\\x0a newline and '' backtick '",
+        )
+        self.validate_identity(
+            'SELECT "string with\\n newline, \\x0a newline and \\" backtick "',
+            write_sql='SELECT \'string with\\n newline, \\\\x0a newline and " backtick \'',
+        )
+        self.validate_identity(
+            "--!ansi_lexer\nSELECT 'string with '' quote'",
+            write_sql="--!ansi_lexer\nSELECT 'string with '' quote'",
+        )
+
+    def test_lexer_doc_multiline_string_literals(self):
+        sql = "$text = @@some\nmultiline\ntext@@;\nSELECT LENGTH($text)"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$text = @@some\nmultiline\ntext@@;\nSELECT Unicode::GetLength($text)",
+            generated,
+        )
+
+    def test_lexer_doc_multiline_string_escaped_double_at(self):
+        sql = "$text = @@some\nmultiline with double at: @@@@\ntext@@;\nSELECT $text"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(sql, generated)
+
+    def test_lexer_doc_typed_string_literals(self):
+        self.validate_identity(
+            'SELECT "foo"u, \'[1;2]\'y, @@{"a":null}@@j',
+            write_sql='SELECT \'foo\'u, \'[1;2]\'y, @@{"a":null}@@j',
+        )
+        self.validate_identity("SELECT 'foo's, 'foo'u, 'foo'y, 'foo'j")
+
+    def test_lexer_doc_numeric_literals(self):
+        self.validate_identity(
+            "SELECT 123l AS `Int64`, 0b01u AS `Uint32`, 0xfful AS `Uint64`, "
+            "0o7ut AS `Uint8`, 456s AS `Int16`, 1.2345f AS `Float`"
+        )
+        self.validate_identity("SELECT 7t AS `Int8`, 8us AS `Uint16`")
+
     # --- Named expressions $name = expr -------------------------------------
 
     def test_named_expression_subquery(self):
