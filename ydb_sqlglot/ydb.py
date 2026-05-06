@@ -7,7 +7,7 @@ from sqlglot import Generator, TokenType, exp, generator, parser, tokens, transf
 from sqlglot.dialects.dialect import Dialect, NormalizationStrategy, concat_to_dpipe_sql, unit_to_var
 from sqlglot.errors import UnsupportedError
 from sqlglot.expressions import Expression
-from sqlglot.helper import flatten, name_sequence, seq_get
+from sqlglot.helper import ensure_list, flatten, name_sequence, seq_get
 from sqlglot.optimizer.scope import ScopeType, find_in_scope, traverse_scope
 from sqlglot.optimizer.simplify import simplify
 from sqlglot.transforms import eliminate_join_marks, move_ctes_to_top_level
@@ -447,6 +447,21 @@ class YdbPostfixCall(exp.Expression):
     arg_types = {"this": True, "expressions": False}
 
 
+class YdbNamedTupleAssign(exp.Expression):
+    """YDB tuple-unpacking named expression assignment: $a, $b = AsTuple(...)."""
+    arg_types = {"this": True, "expressions": True}
+
+
+class YdbBitwiseRotLeft(exp.Expression):
+    """YDB circular left shift operator: a |< b."""
+    arg_types = {"this": True, "expression": True}
+
+
+class YdbBitwiseRotRight(exp.Expression):
+    """YDB circular right shift operator: a >| b."""
+    arg_types = {"this": True, "expression": True}
+
+
 class YdbJsonValue(exp.Expression):
     """YDB JSON_VALUE with PASSING, RETURNING, ON EMPTY, and ON ERROR clauses."""
     arg_types = {
@@ -633,6 +648,7 @@ class YDB(Dialect):
             "ONLY": TokenType.ANTI,
             "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
             "STRING": TokenType.BLOB,     # YDB String = bytes = SQL BLOB
+            "LIST": TokenType.VAR,
         }
 
         SINGLE_TOKENS = {
@@ -649,6 +665,12 @@ class YDB(Dialect):
         IDENTIFIER_ESCAPES = ["\\"]
 
     class Parser(parser.Parser):
+        ARRAY_CONSTRUCTORS = {
+            key: value
+            for key, value in parser.Parser.ARRAY_CONSTRUCTORS.items()
+            if key != "LIST"
+        }
+
         COLUMN_OPERATORS = {
             **parser.Parser.COLUMN_OPERATORS,
             # In YDB :: is a module namespace separator (e.g. DateTime::GetYear),
@@ -794,17 +816,36 @@ class YDB(Dialect):
             # Retreat one extra step to include '$' when falling back to expression parsing.
             index = self._index - 1
             name_var = self._parse_var(any_token=True)
+            names = [name_var] if name_var else []
+
+            while self._match(TokenType.COMMA):
+                if not self._match(TokenType.PARAMETER):
+                    self.raise_error("Expected named expression after comma")
+                next_name = self._parse_var(any_token=True)
+                if not next_name:
+                    self.raise_error("Expected named expression after '$'")
+                names.append(next_name)
+
             if not self._match(TokenType.EQ):
                 # Not an assignment — retreat (including '$') and parse as expression.
                 self._retreat(index)
                 return self._parse_expression()
+
             value = self._merge_ydb_number_suffix(
                 self._parse_select() or self._parse_expression()
             )
+            if len(names) > 1:
+                return self.expression(
+                    YdbNamedTupleAssign(
+                        this=value,
+                        expressions=[exp.Parameter(this=name) for name in names],
+                    )
+                )
+
             return self.expression(
                 exp.Alias(
                     this=value,
-                    alias=exp.Identifier(this=f"${name_var.name}"),
+                    alias=exp.Identifier(this=f"${names[0].name}"),
                 )
             )
 
@@ -903,6 +944,18 @@ class YDB(Dialect):
                 lower_suffix = expression.alias.lower()
                 if (
                     isinstance(literal, exp.Literal)
+                    and literal.is_string
+                    and lower_suffix in _YDB_STRING_SUFFIXES
+                    and literal.meta.get("end") is not None
+                    and alias
+                    and alias.meta.get("start") is not None
+                    and literal.meta["end"] + 1 == alias.meta["start"]
+                ):
+                    literal.meta["ydb_string_suffix"] = expression.alias
+                    return literal
+
+                if (
+                    isinstance(literal, exp.Literal)
                     and not literal.is_string
                     and lower_suffix in _YDB_NUMBER_SUFFIXES
                     and literal.meta.get("end") is not None
@@ -947,10 +1000,11 @@ class YDB(Dialect):
             this: t.Optional[exp.Expression],
             explicit: bool = False,
         ) -> t.Optional[exp.Expression]:
-            return super()._parse_alias(
+            expression = super()._parse_alias(
                 self._merge_ydb_number_suffix(this),
                 explicit=explicit,
             )
+            return self._merge_ydb_number_suffix(expression)
 
         def _parse_ydb_json_value(self) -> YdbJsonValue:
             this = self._parse_bitwise()
@@ -1894,6 +1948,104 @@ class YDB(Dialect):
 
             return self.expression(exp.Lambda(this=body, expressions=params))
 
+        def _parse_bitwise(self) -> t.Optional[exp.Expression]:
+            this = self._parse_term()
+
+            while True:
+                if self._match_pair(TokenType.PIPE, TokenType.LT):
+                    this = self.expression(
+                        YdbBitwiseRotLeft(this=this, expression=self._parse_term())
+                    )
+                elif self._match_pair(TokenType.GT, TokenType.PIPE):
+                    this = self.expression(
+                        YdbBitwiseRotRight(this=this, expression=self._parse_term())
+                    )
+                elif self._match_set(self.BITWISE):
+                    this = self.expression(
+                        self.BITWISE[self._prev.token_type](
+                            this=this,
+                            expression=self._parse_term(),
+                        )
+                    )
+                elif self.dialect.DPIPE_IS_STRING_CONCAT and self._match(TokenType.DPIPE):
+                    this = self.expression(
+                        exp.DPipe(
+                            this=this,
+                            expression=self._parse_term(),
+                            safe=not self.dialect.STRICT_STRING_CONCAT,
+                        )
+                    )
+                elif self._match(TokenType.DQMARK):
+                    this = self.expression(
+                        exp.Coalesce(this=this, expressions=ensure_list(self._parse_term()))
+                    )
+                elif self._match_pair(TokenType.LT, TokenType.LT):
+                    this = self.expression(
+                        exp.BitwiseLeftShift(this=this, expression=self._parse_term())
+                    )
+                elif self._match_pair(TokenType.GT, TokenType.GT):
+                    this = self.expression(
+                        exp.BitwiseRightShift(this=this, expression=self._parse_term())
+                    )
+                else:
+                    break
+
+            return this
+
+        def _parse_range(self, this: t.Optional[exp.Expression] = None) -> t.Optional[exp.Expression]:
+            this = this or self._parse_bitwise()
+            negate = self._match(TokenType.NOT)
+
+            if self._match_text_seq("MATCH"):
+                expression = self.expression(
+                    exp.RegexpLike(this=this, expression=self._parse_bitwise())
+                )
+                expression.meta["ydb_regexp_function"] = "Re2::Match"
+                this = expression
+            elif self._match_set(self.RANGE_PARSERS):
+                expression = self.RANGE_PARSERS[self._prev.token_type](self, this)
+                if not expression:
+                    return this
+
+                this = expression
+            elif self._match(TokenType.ISNULL) or (negate and self._match(TokenType.NULL)):
+                this = self.expression(exp.Is(this=this, expression=exp.Null()))
+
+            if self._match(TokenType.NOTNULL):
+                this = self.expression(exp.Is(this=this, expression=exp.Null()))
+                this = self.expression(exp.Not(this=this))
+
+            if negate:
+                this = self._negate_range(this)
+
+            if self._match(TokenType.IS):
+                this = self._parse_is(this)
+
+            return this
+
+        def _parse_logical_xor(self) -> t.Optional[exp.Expression]:
+            this = self._parse_equality()
+            while self._match(TokenType.XOR):
+                comments = self._prev_comments
+                this = self.expression(
+                    exp.Xor(this=this, expression=self._parse_equality()),
+                    comments=comments,
+                )
+            return this
+
+        def _parse_conjunction(self) -> t.Optional[exp.Expression]:
+            this = self._parse_logical_xor()
+            while self._match_set(self.CONJUNCTION):
+                comments = self._prev_comments
+                this = self.expression(
+                    self.CONJUNCTION[self._prev.token_type](
+                        this=this,
+                        expression=self._parse_logical_xor(),
+                    ),
+                    comments=comments,
+                )
+            return this
+
         def _parse_in(self, this: t.Optional[exp.Expression], alias: bool = False) -> exp.In:
             if self._match_text_seq("COMPACT"):
                 expression = self.expression(exp.In(this=this, field=self._parse_column()))
@@ -2122,6 +2274,20 @@ class YDB(Dialect):
             this = self.sql(expression, "this")
             args = self.expressions(expression, flat=True)
             return f"{this}({args})"
+
+        def ydbnamedtupleassign_sql(self, expression: YdbNamedTupleAssign) -> str:
+            names = ", ".join(self.sql(name) for name in expression.expressions)
+            return f"{names} = {self.sql(expression, 'this')}"
+
+        def ydbbitwiserotleft_sql(self, expression: YdbBitwiseRotLeft) -> str:
+            return f"{self.sql(expression, 'this')} |< {self.sql(expression, 'expression')}"
+
+        def ydbbitwiserotright_sql(self, expression: YdbBitwiseRotRight) -> str:
+            return f"{self.sql(expression, 'this')} >| {self.sql(expression, 'expression')}"
+
+        def regexplike_sql(self, expression: exp.RegexpLike) -> str:
+            func = expression.meta.get("ydb_regexp_function") or "Re2::Grep"
+            return f"{func}({self.sql(expression, 'expression')})({self.sql(expression, 'this')})"
 
         def ydbjsonvalue_sql(self, expression: YdbJsonValue) -> str:
             args = [self.sql(expression, "this"), self.sql(expression, "path")]
@@ -4117,6 +4283,8 @@ class YDB(Dialect):
         def not_sql(self, expression: exp.Not) -> str:
             """YDB requires explicit parentheses around LIKE inside NOT."""
             inner = expression.this
+            if isinstance(inner, exp.Is) and isinstance(inner.expression, exp.Null):
+                return f"{self.sql(inner, 'this')} IS NOT NULL"
             if isinstance(inner, (exp.Like, exp.ILike, exp.SimilarTo)):
                 return f"NOT ({self.sql(inner)})"
             return super().not_sql(expression)
@@ -4197,6 +4365,9 @@ class YDB(Dialect):
             YdbAtString: lambda self, e: self.ydbatstring_sql(e),
             YdbStructLiteral: lambda self, e: self.ydbstructliteral_sql(e),
             YdbPostfixCall: lambda self, e: self.ydbpostfixcall_sql(e),
+            YdbNamedTupleAssign: lambda self, e: self.ydbnamedtupleassign_sql(e),
+            YdbBitwiseRotLeft: lambda self, e: self.ydbbitwiserotleft_sql(e),
+            YdbBitwiseRotRight: lambda self, e: self.ydbbitwiserotright_sql(e),
             YdbJsonExists: lambda self, e: self.ydbjsonexists_sql(e),
             YdbJsonQuery: lambda self, e: self.ydbjsonquery_sql(e),
             YdbJsonValue: lambda self, e: self.ydbjsonvalue_sql(e),
@@ -4232,6 +4403,7 @@ class YDB(Dialect):
             exp.StrPosition: rename_func_not_normalize("Find"),
             exp.Length: rename_func_not_normalize("Unicode::GetLength"),
             exp.Unnest: rename_func_not_normalize("FLATTEN BY"),
+            exp.RegexpLike: regexplike_sql,
             # exp.Round handled by round_sql (precision sign must be negated)
             exp.Set: _set_sql,
             exp.Group: _group_by,
