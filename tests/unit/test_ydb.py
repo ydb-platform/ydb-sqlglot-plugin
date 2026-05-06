@@ -652,9 +652,360 @@ class TestYDBTransforms(Validator):
         """
         self.assertEqual(
             ydb(sql),
-            "CREATE TABLE `table` (id Uint64 NOT NULL, name Utf8, created_at Timestamp, PRIMARY KEY(`id`))\n"
-            "PARTITION BY HASH (`id`);",
+            "CREATE TABLE `table` (id Uint64 NOT NULL, name Utf8, created_at Timestamp, PRIMARY KEY (id))",
         )
+
+    def test_create_table_doc_row_oriented_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64,
+                  b Uint64,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64, b Uint64, c Float, PRIMARY KEY (a, b))",
+        )
+
+    def test_create_table_doc_partitioning_options_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64,
+                  b Uint64,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                WITH (
+                  AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                  AUTO_PARTITIONING_PARTITION_SIZE_MB = 512
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64, b Uint64, c Float, PRIMARY KEY (a, b)) "
+            "WITH (AUTO_PARTITIONING_BY_SIZE=ENABLED, AUTO_PARTITIONING_PARTITION_SIZE_MB=512)",
+        )
+
+    def test_create_table_doc_column_store_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64 NOT NULL,
+                  b Timestamp NOT NULL,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                  STORE = COLUMN
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, PRIMARY KEY (a, b)) "
+            "PARTITION BY HASH(b) WITH (STORE=COLUMN)",
+        )
+
+    def test_create_table_doc_column_store_min_partitions_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64 NOT NULL,
+                  b Timestamp NOT NULL,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                  STORE = COLUMN,
+                  AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 10
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, PRIMARY KEY (a, b)) "
+            "PARTITION BY HASH(b) WITH (STORE=COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT=10)",
+        )
+
+    def test_create_table_doc_if_not_exists(self):
+        self.assertEqual(
+            ydb("CREATE TABLE IF NOT EXISTS table_name (a Uint64, PRIMARY KEY (a))"),
+            "CREATE TABLE IF NOT EXISTS `table_name` (a Uint64, PRIMARY KEY (a))",
+        )
+
+    def test_create_table_as_select_doc_example(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE my_table (
+                    PRIMARY KEY (key1, key2)
+                ) WITH (
+                    STORE=COLUMN
+                ) AS SELECT
+                    key AS key1,
+                    Unwrap(other_key) AS key2,
+                    value,
+                    String::Contains(value, "test") AS has_test
+                FROM other_table
+                """,
+                read="ydb",
+            ),
+            "CREATE TABLE `my_table` (PRIMARY KEY (key1, key2)) WITH (STORE=COLUMN) "
+            "AS SELECT key AS key1, Unwrap(other_key) AS key2, value, "
+            "String::Contains(value, 'test') AS has_test FROM `other_table`",
+        )
+
+    def test_create_table_doc_requires_primary_key(self):
+        with self.assertRaises(UnsupportedError):
+            ydb("CREATE TABLE table_name (a Uint64)")
+
+    def test_create_table_as_select_without_store_passes_through(self):
+        self.assertEqual(
+            ydb("CREATE TABLE dst (PRIMARY KEY (a)) AS SELECT a FROM src", read="ydb"),
+            "CREATE TABLE `dst` (PRIMARY KEY (a)) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_as_select_with_column_definitions_passes_through(self):
+        self.assertEqual(
+            ydb(
+                "CREATE TABLE dst (a Uint64, PRIMARY KEY (a)) WITH (STORE=COLUMN) AS SELECT a FROM src",
+                read="ydb",
+            ),
+            "CREATE TABLE `dst` (a Uint64, PRIMARY KEY (a)) WITH (STORE=COLUMN) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_as_select_with_indexes_passes_through(self):
+        self.assertEqual(
+            ydb(
+                "CREATE TABLE dst (a Uint64, INDEX idx ON (a), PRIMARY KEY (a)) "
+                "WITH (STORE=COLUMN) AS SELECT a FROM src",
+                read="ydb",
+            ),
+            "CREATE TABLE `dst` (a Uint64, INDEX idx ON (a), PRIMARY KEY (a)) "
+            "WITH (STORE=COLUMN) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_as_select_with_column_groups_passes_through(self):
+        self.assertEqual(
+            ydb(
+                "CREATE TABLE dst (a Uint64, PRIMARY KEY (a), FAMILY family_large (COMPRESSION = \"zstd\")) "
+                "WITH (STORE=COLUMN) AS SELECT a FROM src",
+                read="ydb",
+            ),
+            "CREATE TABLE `dst` (a Uint64, PRIMARY KEY (a), FAMILY family_large (COMPRESSION='zstd')) "
+            "WITH (STORE=COLUMN) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_secondary_index_doc_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE my_table (
+                    a Uint64,
+                    b Bool,
+                    c Utf8,
+                    d Date,
+                    INDEX idx_d GLOBAL ON (d),
+                    INDEX idx_ba GLOBAL ASYNC ON (b, a) COVER (c),
+                    PRIMARY KEY (a)
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `my_table` (a Uint64, b Uint8, c Utf8, d DATE, "
+            "INDEX idx_d GLOBAL ON (d), "
+            "INDEX idx_ba GLOBAL ASYNC ON (b, a) COVER (c), PRIMARY KEY (a))",
+        )
+
+    def test_create_table_secondary_index_doc_defaults(self):
+        self.assertEqual(
+            self.parse_one("CREATE TABLE t (a Uint64, b Utf8, INDEX idx ON (b), PRIMARY KEY (a))").sql(dialect="ydb"),
+            "CREATE TABLE `t` (a Uint64, b Utf8, INDEX idx ON (b), PRIMARY KEY (a))",
+        )
+
+    def test_create_table_secondary_index_doc_full_syntax(self):
+        self.assertEqual(
+            self.parse_one(
+                "CREATE TABLE t ("
+                "a Uint64, b Utf8, "
+                "INDEX idx LOCAL SYNC USING secondary ON (b) COVER (a) WITH (foo = 1), "
+                "PRIMARY KEY (a)"
+                ")"
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `t` (a Uint64, b Utf8, "
+            "INDEX idx LOCAL SYNC USING secondary ON (b) COVER (a) WITH (foo=1), "
+            "PRIMARY KEY (a))",
+        )
+
+    def test_create_table_secondary_index_doc_requires_index_columns(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("CREATE TABLE t (a Uint64, INDEX idx ON (), PRIMARY KEY (a))")
+
+    def test_create_table_secondary_index_doc_rejects_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                "CREATE TABLE t (a Uint64, b Utf8, INDEX idx ON (b), PRIMARY KEY (a)) WITH (STORE = COLUMN)"
+            ).sql(dialect="ydb")
+
+    def test_create_table_family_doc_row_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE series_with_families (
+                    series_id Uint64,
+                    title Utf8,
+                    series_info Utf8 FAMILY family_large,
+                    release_date Uint64,
+                    PRIMARY KEY (series_id),
+                    FAMILY default (
+                        DATA = "ssd",
+                        COMPRESSION = "off"
+                    ),
+                    FAMILY family_large (
+                        DATA = "rot",
+                        COMPRESSION = "lz4"
+                    )
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `series_with_families` (series_id Uint64, title Utf8, "
+            "series_info Utf8 FAMILY family_large, release_date Uint64, "
+            "PRIMARY KEY (series_id), FAMILY default (DATA='ssd', COMPRESSION='off'), "
+            "FAMILY family_large (DATA='rot', COMPRESSION='lz4'))",
+        )
+
+    def test_create_table_family_doc_column_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE series_with_families (
+                    series_id Uint64,
+                    title Utf8,
+                    series_info Utf8 FAMILY family_large,
+                    release_date Uint64,
+                    PRIMARY KEY (series_id),
+                    FAMILY default (
+                        COMPRESSION = "lz4"
+                    ),
+                    FAMILY family_large (
+                        COMPRESSION = "zstd",
+                        COMPRESSION_LEVEL = 5
+                    )
+                )
+                WITH (STORE = COLUMN)
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `series_with_families` (series_id Uint64, title Utf8, "
+            "series_info Utf8 FAMILY family_large, release_date Uint64, "
+            "PRIMARY KEY (series_id), FAMILY default (COMPRESSION='lz4'), "
+            "FAMILY family_large (COMPRESSION='zstd', COMPRESSION_LEVEL=5)) WITH (STORE=COLUMN)",
+        )
+
+    def test_create_table_family_doc_data_rejects_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                'CREATE TABLE t (a Uint64 FAMILY fam, PRIMARY KEY (a), FAMILY fam (DATA = "ssd")) '
+                "WITH (STORE = COLUMN)"
+            ).sql(dialect="ydb")
+
+    def test_create_table_family_doc_compression_level_requires_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                "CREATE TABLE t (a Uint64 FAMILY fam, PRIMARY KEY (a), FAMILY fam (COMPRESSION_LEVEL = 5))"
+            ).sql(dialect="ydb")
+
+    def test_create_table_family_doc_zstd_requires_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                'CREATE TABLE t (a Uint64 FAMILY fam, PRIMARY KEY (a), FAMILY fam (COMPRESSION = "zstd"))'
+            ).sql(dialect="ydb")
+
+    def test_create_table_with_doc_ttl_row_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE my_table (
+                    id Uint64,
+                    title Utf8,
+                    expire_at Timestamp,
+                    PRIMARY KEY (id)
+                )
+                WITH (
+                    TTL = Interval("PT0S") ON expire_at
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `my_table` (id Uint64, title Utf8, expire_at Timestamp, "
+            "PRIMARY KEY (id)) WITH (TTL=Interval('PT0S') ON expire_at)",
+        )
+
+    def test_create_table_with_doc_ttl_column_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE table_name (
+                    a Uint64 NOT NULL,
+                    b Timestamp NOT NULL,
+                    c Float,
+                    PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                    STORE = COLUMN,
+                    TTL = Interval("PT0S") ON b
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, "
+            "PRIMARY KEY (a, b)) PARTITION BY HASH(b) WITH (STORE=COLUMN, TTL=Interval('PT0S') ON b)",
+        )
+
+    def test_create_table_with_doc_ttl_external_data_source_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE table_name (
+                    a Uint64 NOT NULL,
+                    b Timestamp NOT NULL,
+                    c Float,
+                    PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                    STORE = COLUMN,
+                    TTL =
+                        Interval("PT1D") TO EXTERNAL DATA SOURCE `/Root/s3`,
+                        Interval("P2D") DELETE
+                    ON b
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, "
+            "PRIMARY KEY (a, b)) PARTITION BY HASH(b) WITH (STORE=COLUMN, "
+            "TTL=Interval('PT1D') TO EXTERNAL DATA SOURCE `/Root/s3`, Interval('P2D') DELETE ON b)",
+        )
+
+    def test_create_table_with_doc_ttl_numeric_units(self):
+        for unit in ("SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"):
+            with self.subTest(unit=unit):
+                self.assertEqual(
+                    self.parse_one(
+                        f'CREATE TABLE t (id Uint64, ttl Uint64, PRIMARY KEY (id)) '
+                        f'WITH (TTL = Interval("PT1S") ON ttl AS {unit})'
+                    ).sql(dialect="ydb"),
+                    f"CREATE TABLE `t` (id Uint64, ttl Uint64, PRIMARY KEY (id)) "
+                    f"WITH (TTL=Interval('PT1S') ON ttl AS {unit})",
+                )
+
+    def test_create_table_with_doc_ttl_external_data_source_requires_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                'CREATE TABLE t (id Uint64, ttl Timestamp, PRIMARY KEY (id)) '
+                'WITH (TTL = Interval("PT1D") TO EXTERNAL DATA SOURCE `/Root/s3` ON ttl)'
+            ).sql(dialect="ydb")
 
     # --- Function transforms ------------------------------------------------
 
@@ -965,6 +1316,9 @@ class TestYDBParser(Validator):
 
     def test_module_function_math(self):
         self.validate_identity("Math::Round(x, -2)")
+
+    def test_module_function_string_namespace(self):
+        self.validate_identity("String::Contains(value, 'test')")
 
     # --- DECLARE $p AS Type -------------------------------------------------
 
