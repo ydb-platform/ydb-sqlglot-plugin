@@ -652,9 +652,360 @@ class TestYDBTransforms(Validator):
         """
         self.assertEqual(
             ydb(sql),
-            "CREATE TABLE `table` (id Uint64 NOT NULL, name Utf8, created_at Timestamp, PRIMARY KEY(`id`))\n"
-            "PARTITION BY HASH (`id`);",
+            "CREATE TABLE `table` (id Uint64 NOT NULL, name Utf8, created_at Timestamp, PRIMARY KEY (id))",
         )
+
+    def test_create_table_doc_row_oriented_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64,
+                  b Uint64,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64, b Uint64, c Float, PRIMARY KEY (a, b))",
+        )
+
+    def test_create_table_doc_partitioning_options_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64,
+                  b Uint64,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                WITH (
+                  AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                  AUTO_PARTITIONING_PARTITION_SIZE_MB = 512
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64, b Uint64, c Float, PRIMARY KEY (a, b)) "
+            "WITH (AUTO_PARTITIONING_BY_SIZE=ENABLED, AUTO_PARTITIONING_PARTITION_SIZE_MB=512)",
+        )
+
+    def test_create_table_doc_column_store_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64 NOT NULL,
+                  b Timestamp NOT NULL,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                  STORE = COLUMN
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, PRIMARY KEY (a, b)) "
+            "PARTITION BY HASH(b) WITH (STORE=COLUMN)",
+        )
+
+    def test_create_table_doc_column_store_min_partitions_snippet(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE table_name (
+                  a Uint64 NOT NULL,
+                  b Timestamp NOT NULL,
+                  c Float,
+                  PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                  STORE = COLUMN,
+                  AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 10
+                )
+                """
+            ),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, PRIMARY KEY (a, b)) "
+            "PARTITION BY HASH(b) WITH (STORE=COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT=10)",
+        )
+
+    def test_create_table_doc_if_not_exists(self):
+        self.assertEqual(
+            ydb("CREATE TABLE IF NOT EXISTS table_name (a Uint64, PRIMARY KEY (a))"),
+            "CREATE TABLE IF NOT EXISTS `table_name` (a Uint64, PRIMARY KEY (a))",
+        )
+
+    def test_create_table_as_select_doc_example(self):
+        self.assertEqual(
+            ydb(
+                """
+                CREATE TABLE my_table (
+                    PRIMARY KEY (key1, key2)
+                ) WITH (
+                    STORE=COLUMN
+                ) AS SELECT
+                    key AS key1,
+                    Unwrap(other_key) AS key2,
+                    value,
+                    String::Contains(value, "test") AS has_test
+                FROM other_table
+                """,
+                read="ydb",
+            ),
+            "CREATE TABLE `my_table` (PRIMARY KEY (key1, key2)) WITH (STORE=COLUMN) "
+            "AS SELECT key AS key1, Unwrap(other_key) AS key2, value, "
+            "String::Contains(value, 'test') AS has_test FROM `other_table`",
+        )
+
+    def test_create_table_doc_requires_primary_key(self):
+        with self.assertRaises(UnsupportedError):
+            ydb("CREATE TABLE table_name (a Uint64)")
+
+    def test_create_table_as_select_without_store_passes_through(self):
+        self.assertEqual(
+            ydb("CREATE TABLE dst (PRIMARY KEY (a)) AS SELECT a FROM src", read="ydb"),
+            "CREATE TABLE `dst` (PRIMARY KEY (a)) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_as_select_with_column_definitions_passes_through(self):
+        self.assertEqual(
+            ydb(
+                "CREATE TABLE dst (a Uint64, PRIMARY KEY (a)) WITH (STORE=COLUMN) AS SELECT a FROM src",
+                read="ydb",
+            ),
+            "CREATE TABLE `dst` (a Uint64, PRIMARY KEY (a)) WITH (STORE=COLUMN) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_as_select_with_indexes_passes_through(self):
+        self.assertEqual(
+            ydb(
+                "CREATE TABLE dst (a Uint64, INDEX idx ON (a), PRIMARY KEY (a)) "
+                "WITH (STORE=COLUMN) AS SELECT a FROM src",
+                read="ydb",
+            ),
+            "CREATE TABLE `dst` (a Uint64, INDEX idx ON (a), PRIMARY KEY (a)) "
+            "WITH (STORE=COLUMN) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_as_select_with_column_groups_passes_through(self):
+        self.assertEqual(
+            ydb(
+                "CREATE TABLE dst (a Uint64, PRIMARY KEY (a), FAMILY family_large (COMPRESSION = \"zstd\")) "
+                "WITH (STORE=COLUMN) AS SELECT a FROM src",
+                read="ydb",
+            ),
+            "CREATE TABLE `dst` (a Uint64, PRIMARY KEY (a), FAMILY family_large (COMPRESSION='zstd')) "
+            "WITH (STORE=COLUMN) AS SELECT a FROM `src`",
+        )
+
+    def test_create_table_secondary_index_doc_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE my_table (
+                    a Uint64,
+                    b Bool,
+                    c Utf8,
+                    d Date,
+                    INDEX idx_d GLOBAL ON (d),
+                    INDEX idx_ba GLOBAL ASYNC ON (b, a) COVER (c),
+                    PRIMARY KEY (a)
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `my_table` (a Uint64, b Uint8, c Utf8, d DATE, "
+            "INDEX idx_d GLOBAL ON (d), "
+            "INDEX idx_ba GLOBAL ASYNC ON (b, a) COVER (c), PRIMARY KEY (a))",
+        )
+
+    def test_create_table_secondary_index_doc_defaults(self):
+        self.assertEqual(
+            self.parse_one("CREATE TABLE t (a Uint64, b Utf8, INDEX idx ON (b), PRIMARY KEY (a))").sql(dialect="ydb"),
+            "CREATE TABLE `t` (a Uint64, b Utf8, INDEX idx ON (b), PRIMARY KEY (a))",
+        )
+
+    def test_create_table_secondary_index_doc_full_syntax(self):
+        self.assertEqual(
+            self.parse_one(
+                "CREATE TABLE t ("
+                "a Uint64, b Utf8, "
+                "INDEX idx LOCAL SYNC USING secondary ON (b) COVER (a) WITH (foo = 1), "
+                "PRIMARY KEY (a)"
+                ")"
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `t` (a Uint64, b Utf8, "
+            "INDEX idx LOCAL SYNC USING secondary ON (b) COVER (a) WITH (foo=1), "
+            "PRIMARY KEY (a))",
+        )
+
+    def test_create_table_secondary_index_doc_requires_index_columns(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("CREATE TABLE t (a Uint64, INDEX idx ON (), PRIMARY KEY (a))")
+
+    def test_create_table_secondary_index_doc_rejects_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                "CREATE TABLE t (a Uint64, b Utf8, INDEX idx ON (b), PRIMARY KEY (a)) WITH (STORE = COLUMN)"
+            ).sql(dialect="ydb")
+
+    def test_create_table_family_doc_row_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE series_with_families (
+                    series_id Uint64,
+                    title Utf8,
+                    series_info Utf8 FAMILY family_large,
+                    release_date Uint64,
+                    PRIMARY KEY (series_id),
+                    FAMILY default (
+                        DATA = "ssd",
+                        COMPRESSION = "off"
+                    ),
+                    FAMILY family_large (
+                        DATA = "rot",
+                        COMPRESSION = "lz4"
+                    )
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `series_with_families` (series_id Uint64, title Utf8, "
+            "series_info Utf8 FAMILY family_large, release_date Uint64, "
+            "PRIMARY KEY (series_id), FAMILY default (DATA='ssd', COMPRESSION='off'), "
+            "FAMILY family_large (DATA='rot', COMPRESSION='lz4'))",
+        )
+
+    def test_create_table_family_doc_column_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE series_with_families (
+                    series_id Uint64,
+                    title Utf8,
+                    series_info Utf8 FAMILY family_large,
+                    release_date Uint64,
+                    PRIMARY KEY (series_id),
+                    FAMILY default (
+                        COMPRESSION = "lz4"
+                    ),
+                    FAMILY family_large (
+                        COMPRESSION = "zstd",
+                        COMPRESSION_LEVEL = 5
+                    )
+                )
+                WITH (STORE = COLUMN)
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `series_with_families` (series_id Uint64, title Utf8, "
+            "series_info Utf8 FAMILY family_large, release_date Uint64, "
+            "PRIMARY KEY (series_id), FAMILY default (COMPRESSION='lz4'), "
+            "FAMILY family_large (COMPRESSION='zstd', COMPRESSION_LEVEL=5)) WITH (STORE=COLUMN)",
+        )
+
+    def test_create_table_family_doc_data_rejects_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                'CREATE TABLE t (a Uint64 FAMILY fam, PRIMARY KEY (a), FAMILY fam (DATA = "ssd")) '
+                "WITH (STORE = COLUMN)"
+            ).sql(dialect="ydb")
+
+    def test_create_table_family_doc_compression_level_requires_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                "CREATE TABLE t (a Uint64 FAMILY fam, PRIMARY KEY (a), FAMILY fam (COMPRESSION_LEVEL = 5))"
+            ).sql(dialect="ydb")
+
+    def test_create_table_family_doc_zstd_requires_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                'CREATE TABLE t (a Uint64 FAMILY fam, PRIMARY KEY (a), FAMILY fam (COMPRESSION = "zstd"))'
+            ).sql(dialect="ydb")
+
+    def test_create_table_with_doc_ttl_row_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE my_table (
+                    id Uint64,
+                    title Utf8,
+                    expire_at Timestamp,
+                    PRIMARY KEY (id)
+                )
+                WITH (
+                    TTL = Interval("PT0S") ON expire_at
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `my_table` (id Uint64, title Utf8, expire_at Timestamp, "
+            "PRIMARY KEY (id)) WITH (TTL=Interval('PT0S') ON expire_at)",
+        )
+
+    def test_create_table_with_doc_ttl_column_oriented_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE table_name (
+                    a Uint64 NOT NULL,
+                    b Timestamp NOT NULL,
+                    c Float,
+                    PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                    STORE = COLUMN,
+                    TTL = Interval("PT0S") ON b
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, "
+            "PRIMARY KEY (a, b)) PARTITION BY HASH(b) WITH (STORE=COLUMN, TTL=Interval('PT0S') ON b)",
+        )
+
+    def test_create_table_with_doc_ttl_external_data_source_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE TABLE table_name (
+                    a Uint64 NOT NULL,
+                    b Timestamp NOT NULL,
+                    c Float,
+                    PRIMARY KEY (a, b)
+                )
+                PARTITION BY HASH(b)
+                WITH (
+                    STORE = COLUMN,
+                    TTL =
+                        Interval("PT1D") TO EXTERNAL DATA SOURCE `/Root/s3`,
+                        Interval("P2D") DELETE
+                    ON b
+                )
+                """
+            ).sql(dialect="ydb"),
+            "CREATE TABLE `table_name` (a Uint64 NOT NULL, b Timestamp NOT NULL, c Float, "
+            "PRIMARY KEY (a, b)) PARTITION BY HASH(b) WITH (STORE=COLUMN, "
+            "TTL=Interval('PT1D') TO EXTERNAL DATA SOURCE `/Root/s3`, Interval('P2D') DELETE ON b)",
+        )
+
+    def test_create_table_with_doc_ttl_numeric_units(self):
+        for unit in ("SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"):
+            with self.subTest(unit=unit):
+                self.assertEqual(
+                    self.parse_one(
+                        f'CREATE TABLE t (id Uint64, ttl Uint64, PRIMARY KEY (id)) '
+                        f'WITH (TTL = Interval("PT1S") ON ttl AS {unit})'
+                    ).sql(dialect="ydb"),
+                    f"CREATE TABLE `t` (id Uint64, ttl Uint64, PRIMARY KEY (id)) "
+                    f"WITH (TTL=Interval('PT1S') ON ttl AS {unit})",
+                )
+
+    def test_create_table_with_doc_ttl_external_data_source_requires_column_store(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                'CREATE TABLE t (id Uint64, ttl Timestamp, PRIMARY KEY (id)) '
+                'WITH (TTL = Interval("PT1D") TO EXTERNAL DATA SOURCE `/Root/s3` ON ttl)'
+            ).sql(dialect="ydb")
 
     # --- Function transforms ------------------------------------------------
 
@@ -673,7 +1024,7 @@ class TestYDBTransforms(Validator):
         self.assertEqual(ydb("SELECT IF(10 > 20, 'TRUE', 'FALSE') FROM data"), "SELECT IF(10 > 20, 'TRUE', 'FALSE') FROM `data`")
 
     def test_if_without_else_passthrough(self):
-        self.assertEqual(ydb("SELECT IF(x IS NOT NULL, AsStruct(x AS x)) FROM data"), "SELECT IF(NOT (x IS NULL), AsStruct(x AS x)) FROM `data`")
+        self.assertEqual(ydb("SELECT IF(x IS NOT NULL, AsStruct(x AS x)) FROM data"), "SELECT IF(x IS NOT NULL, AsStruct(x AS x)) FROM `data`")
 
     def test_array_any(self):
         self.assertEqual(
@@ -769,7 +1120,7 @@ class TestYDBTransforms(Validator):
             ydb(sql),
             "SELECT a.id AS id FROM `a` LEFT JOIN "
             "(SELECT a_id AS _u_1, 1 AS _exists_flag FROM `b` WHERE TRUE GROUP BY a_id AS _u_1) AS _u_0 "
-            "ON a.id = _u_0._u_1 WHERE NOT (_u_0._u_1 IS NULL)",
+            "ON a.id = _u_0._u_1 WHERE _u_0._u_1 IS NOT NULL",
         )
 
     def test_decorrelate_multiple_subqueries(self):
@@ -802,8 +1153,8 @@ class TestYDBTransforms(Validator):
             "SELECT a.id AS id FROM `a` LEFT JOIN "
             "(SELECT a_id AS _u_3, 1 AS _exists_flag FROM `b` "
             "LEFT JOIN (SELECT b_id AS _u_1, 1 AS _exists_flag FROM `c` WHERE TRUE GROUP BY b_id AS _u_1) AS _u_0 "
-            "ON b.id = _u_0._u_1 WHERE TRUE AND NOT (_u_0._u_1 IS NULL) GROUP BY a_id AS a_id) AS _u_2 "
-            "ON a.id = _u_2._u_3 WHERE NOT (_u_2._u_3 IS NULL)",
+            "ON b.id = _u_0._u_1 WHERE TRUE AND _u_0._u_1 IS NOT NULL GROUP BY a_id AS a_id) AS _u_2 "
+            "ON a.id = _u_2._u_3 WHERE _u_2._u_3 IS NOT NULL",
         )
 
     def test_unnest_uncorrelated_in_subquery(self):
@@ -812,7 +1163,7 @@ class TestYDBTransforms(Validator):
             ydb(sql),
             "SELECT a.id AS id FROM `a` LEFT JOIN "
             "(SELECT b.a_id AS a_id FROM `b` WHERE b.value > 10 GROUP BY a_id AS a_id) AS _u_0 "
-            "ON a.id = _u_0.a_id WHERE NOT (_u_0.a_id IS NULL)",
+            "ON a.id = _u_0.a_id WHERE _u_0.a_id IS NOT NULL",
         )
 
     def test_unnest_correlated_in_subquery(self):
@@ -965,6 +1316,9 @@ class TestYDBParser(Validator):
 
     def test_module_function_math(self):
         self.validate_identity("Math::Round(x, -2)")
+
+    def test_module_function_string_namespace(self):
+        self.validate_identity("String::Contains(value, 'test')")
 
     # --- DECLARE $p AS Type -------------------------------------------------
 
@@ -1475,6 +1829,349 @@ GROUP BY user, SessionWindow(ts, $init, $update, $calculate) AS session_start;""
         self.validate_identity(
             "--!syntax_v1\nPRAGMA TablePathPrefix = '/db/name'",
         )
+
+    # --- Lexical structure --------------------------------------------------
+
+    def test_lexer_doc_comments_are_whitespace(self):
+        sql = "SELECT 1; -- A single-line comment\n/* Some multi-line comment */ SELECT 2"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "SELECT 1;\n /* A single-line comment */;\n/* Some multi-line comment */ SELECT 2",
+            generated,
+        )
+
+    def test_lexer_doc_identifiers(self):
+        self.validate_identity(
+            "SELECT my_column FROM my_table",
+            write_sql="SELECT my_column FROM `my_table`",
+        )
+        self.validate_identity(
+            "SELECT `column with space` from T",
+            write_sql="SELECT `column with space` FROM `T`",
+        )
+        self.validate_identity("SELECT * FROM `my_dir/my_table`")
+        self.validate_identity(
+            "SELECT `select` FROM T",
+            write_sql="SELECT `select` FROM `T`",
+        )
+
+    def test_lexer_doc_backtick_identifier_escapes(self):
+        self.validate_identity(
+            "SELECT 1 as `column with\\n newline, \\x0a newline and \\` backtick `",
+            write_sql="SELECT 1 AS `column with\n newline, \\x0a newline and `` backtick `",
+        )
+
+    def test_lexer_doc_ansi_double_quoted_identifier(self):
+        self.validate_identity(
+            '--!ansi_lexer\nSELECT 1 as "column with "" double quote"',
+            write_sql='--!ansi_lexer\nSELECT 1 AS `column with " double quote`',
+        )
+
+    def test_lexer_doc_string_literals(self):
+        self.validate_identity(
+            "SELECT 'string with\\n newline, \\x0a newline and \\' backtick '",
+            write_sql="SELECT 'string with\\n newline, \\\\x0a newline and '' backtick '",
+        )
+        self.validate_identity(
+            'SELECT "string with\\n newline, \\x0a newline and \\" backtick "',
+            write_sql='SELECT \'string with\\n newline, \\\\x0a newline and " backtick \'',
+        )
+        self.validate_identity(
+            "--!ansi_lexer\nSELECT 'string with '' quote'",
+            write_sql="--!ansi_lexer\nSELECT 'string with '' quote'",
+        )
+
+    def test_lexer_doc_multiline_string_literals(self):
+        sql = "$text = @@some\nmultiline\ntext@@;\nSELECT LENGTH($text)"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$text = @@some\nmultiline\ntext@@;\nSELECT Unicode::GetLength($text)",
+            generated,
+        )
+
+    def test_lexer_doc_multiline_string_escaped_double_at(self):
+        sql = "$text = @@some\nmultiline with double at: @@@@\ntext@@;\nSELECT $text"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(sql, generated)
+
+    def test_lexer_doc_typed_string_literals(self):
+        self.validate_identity(
+            'SELECT "foo"u, \'[1;2]\'y, @@{"a":null}@@j',
+            write_sql='SELECT \'foo\'u, \'[1;2]\'y, @@{"a":null}@@j',
+        )
+        self.validate_identity("SELECT 'foo's, 'foo'u, 'foo'y, 'foo'j")
+
+    def test_lexer_doc_numeric_literals(self):
+        self.validate_identity(
+            "SELECT 123l AS `Int64`, 0b01u AS `Uint32`, 0xfful AS `Uint64`, "
+            "0o7ut AS `Uint8`, 456s AS `Int16`, 1.2345f AS `Float`"
+        )
+        self.validate_identity("SELECT 7t AS `Int8`, 8us AS `Uint16`")
+
+    # --- Expressions --------------------------------------------------------
+
+    def test_expressions_doc_string_concatenation(self):
+        self.validate_identity('SELECT "fo" || "o"', write_sql="SELECT 'fo' || 'o'")
+
+    def test_expressions_doc_pattern_matching(self):
+        self.validate_identity(
+            "SELECT * FROM my_table WHERE string_column REGEXP '\\\\d+'",
+            write_sql="SELECT * FROM `my_table` WHERE Re2::Grep('\\\\d+')(string_column)",
+        )
+        self.validate_identity(
+            "SELECT string_column RLIKE '^[a-z]+', string_column MATCH 'foo' FROM my_table",
+            write_sql=(
+                "SELECT Re2::Grep('^[a-z]+')(string_column), "
+                "Re2::Match('foo')(string_column) FROM `my_table`"
+            ),
+        )
+        self.validate_identity(
+            "SELECT string_column LIKE '___!_!_!_!!!!!!' ESCAPE '!' FROM my_table",
+            write_sql=(
+                "SELECT string_column LIKE '___!_!_!_!!!!!!' ESCAPE '!' "
+                "FROM `my_table`"
+            ),
+        )
+        self.validate_identity(
+            "SELECT * FROM my_table WHERE key LIKE 'foo%bar'",
+            write_sql="SELECT * FROM `my_table` WHERE key LIKE 'foo%bar'",
+        )
+
+    def test_expressions_doc_operators(self):
+        self.validate_identity("SELECT 2 + 2")
+        self.validate_identity("SELECT 0.0 / 0.0")
+        self.validate_identity("SELECT 2 > 1")
+        self.validate_identity(
+            "SELECT a == b, a != b, a <> b",
+            write_sql="SELECT a = b, a <> b, a <> b",
+        )
+        self.validate_identity("SELECT 3 > 0 AND false", write_sql="SELECT 3 > 0 AND FALSE")
+        self.validate_identity("SELECT a XOR b")
+        self.validate_identity(
+            "SELECT key << 10 AS key, ~value AS value FROM my_table",
+            write_sql="SELECT key << 10 AS key, ~value AS value FROM `my_table`",
+        )
+        self.validate_identity("SELECT a |< b, a >| b")
+        self.validate_identity(
+            "SELECT a ?? b ?? c",
+            write_sql="SELECT COALESCE(COALESCE(a, b), c)",
+        )
+
+    def test_expressions_doc_predicates(self):
+        self.validate_identity(
+            "SELECT key FROM my_table WHERE value IS NOT NULL",
+            write_sql="SELECT key FROM `my_table` WHERE value IS NOT NULL",
+        )
+        self.validate_identity("SELECT a IS DISTINCT FROM b, a IS NOT DISTINCT FROM b")
+        self.validate_identity(
+            "SELECT * FROM my_table WHERE key BETWEEN 10 AND 20",
+            write_sql="SELECT * FROM `my_table` WHERE key BETWEEN 10 AND 20",
+        )
+
+    def test_expressions_doc_in(self):
+        self.validate_identity(
+            "SELECT column IN (1, 2, 3) FROM my_table",
+            write_sql="SELECT column IN (1, 2, 3) FROM `my_table`",
+        )
+        self.validate_identity(
+            'SELECT * FROM my_table WHERE string_column IN ("a", "b", "c")',
+            write_sql="SELECT * FROM `my_table` WHERE string_column IN ('a', 'b', 'c')",
+        )
+
+        sql = '$foo = AsList(1, 2, 3);\nSELECT 1 IN $foo'
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual("$foo = AsList(1, 2, 3);\nSELECT 1 IN $foo", generated)
+
+        sql = (
+            "$values = (SELECT column + 1 FROM table);\n"
+            "SELECT * FROM my_table WHERE column1 IN COMPACT $values "
+            "AND column2 NOT IN (SELECT other_column FROM other_table)"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$values = (SELECT column + 1 FROM `table`);\n\n"
+            "SELECT * FROM `my_table` WHERE column1 IN COMPACT $values "
+            "AND NOT column2 IN (SELECT other_column AS other_column FROM `other_table`)",
+            generated,
+        )
+
+    def test_expressions_doc_as_cast_bitcast(self):
+        self.validate_identity(
+            "SELECT key AS k FROM my_table",
+            write_sql="SELECT key AS k FROM `my_table`",
+        )
+        self.validate_identity(
+            "SELECT t.key FROM my_table AS t",
+            write_sql="SELECT t.key AS key FROM `my_table` AS t",
+        )
+        self.validate_identity(
+            "SELECT MyFunction(key, 123 AS my_optional_arg) FROM my_table",
+            write_sql="SELECT MyFunction(key, 123 AS my_optional_arg) FROM `my_table`",
+        )
+        self.validate_identity(
+            'SELECT CAST("12345" AS Double), CAST(1.2345 AS Uint8), CAST(12345 AS String), '
+            'CAST("1.2345" AS Decimal(5, 2)), CAST("xyz" AS Uint64) IS NULL, '
+            "CAST(-1 AS Uint16) IS NULL, CAST([-1, 0, 1] AS List<Uint8?>), "
+            'CAST(["3.14", "bad", "42"] AS List<Float>), CAST(255 AS Uint8), '
+            "CAST(256 AS Uint8) IS NULL",
+            write_sql=(
+                "SELECT CAST('12345' AS Double), CAST(1.2345 AS Uint8), "
+                "CAST(12345 AS String), CAST('1.2345' AS Decimal(5, 2)), "
+                "CAST('xyz' AS Uint64) IS NULL, CAST(-1 AS Uint16) IS NULL, "
+                "CAST(AsList(-1, 0, 1) AS List<Optional<Uint8>>), "
+                "CAST(AsList('3.14', 'bad', '42') AS List<Float>), "
+                "CAST(255 AS Uint8), CAST(256 AS Uint8) IS NULL"
+            ),
+        )
+        self.validate_identity(
+            "SELECT BITCAST(100000ul AS Uint32), BITCAST(100000ul AS Int16), "
+            "BITCAST(100000ul AS Uint16), BITCAST(-1 AS Int16), BITCAST(-1 AS Uint16)"
+        )
+
+    def test_expressions_doc_case(self):
+        self.validate_identity(
+            'SELECT CASE WHEN value > 0 THEN "positive" ELSE "negative" END FROM my_table',
+            write_sql="SELECT CASE WHEN value > 0 THEN 'positive' ELSE 'negative' END FROM `my_table`",
+        )
+        self.validate_identity(
+            'SELECT CASE value WHEN 0 THEN "zero" WHEN 1 THEN "one" ELSE "not zero or one" END FROM my_table',
+            write_sql=(
+                "SELECT CASE value WHEN 0 THEN 'zero' WHEN 1 THEN 'one' "
+                "ELSE 'not zero or one' END FROM `my_table`"
+            ),
+        )
+
+    def test_expressions_doc_named_expressions(self):
+        sql = (
+            "$multiplier = 712;\n"
+            "SELECT a * $multiplier, b * $multiplier, (a + b) * $multiplier FROM abc_table;\n"
+            "$multiplier = c;\n"
+            "SELECT a * $multiplier FROM abc_table"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$multiplier = 712;\n"
+            "SELECT a * $multiplier, b * $multiplier, (a + b) * $multiplier FROM `abc_table`;\n"
+            "$multiplier = c;\n"
+            "SELECT a * $multiplier FROM `abc_table`",
+            generated,
+        )
+
+        sql = (
+            "$intermediate = (SELECT value * value AS square, value FROM my_table);\n"
+            "SELECT a.square * b.value FROM $intermediate AS a "
+            "INNER JOIN $intermediate AS b ON a.value == b.square"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$intermediate = (SELECT value * value AS square, value FROM `my_table`);\n\n"
+            "SELECT a.square * b.value FROM $intermediate AS a "
+            "INNER JOIN $intermediate AS b ON a.value = b.square",
+            generated,
+        )
+
+        self.validate_identity(
+            '$a, $_, $c = AsTuple(1, 5u, "test")',
+            write_sql="$a, $_, $c = AsTuple(1, 5u, 'test')",
+        )
+        self.validate_identity("$x, $y = AsTuple($y, $x)")
+
+    def test_expressions_doc_table_expressions(self):
+        sql = "$input = SELECT a, b, c FROM T;\nSELECT * FROM $input"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual("$input = (SELECT a, b, c FROM `T`);\n\nSELECT * FROM $input AS input", generated)
+
+        self.validate_identity(
+            "SELECT * FROM T WHERE key IN (SELECT k FROM T1)",
+            write_sql=(
+                "SELECT * FROM `T` LEFT JOIN (SELECT k AS k FROM `T1` GROUP BY k AS k) AS _u_0 "
+                "ON key = _u_0.k WHERE _u_0.k IS NOT NULL"
+            ),
+        )
+
+        sql = "$count = SELECT COUNT(*) FROM T;\nSELECT * FROM T ORDER BY key LIMIT $count / 2"
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$count = (SELECT COUNT(*) FROM `T`);\n\nSELECT * FROM `T` ORDER BY key LIMIT $count / 2",
+            generated,
+        )
+
+    def test_expressions_doc_lambda_functions(self):
+        sql = (
+            '$f = ($y) -> { $prefix = "x"; RETURN $prefix || $y; };\n'
+            '$g = ($y) -> ("x" || $y);\n'
+            "$h = ($x, $y?) -> ($x + ($y ?? 0));\n"
+            'SELECT $f("y"), $g("z"), $h(1), $h(2, 3)'
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$f = ($y) -> { $prefix = 'x'; RETURN $prefix || $y };\n"
+            "$g = ($y) -> ('x' || $y);\n"
+            "$h = ($x, $y?) -> ($x + (COALESCE($y, 0)));\n"
+            "SELECT $f('y'), $g('z'), $h(1), $h(2, 3)",
+            generated,
+        )
+
+        sql = '$f = ($x, $_) -> ($x || "suffix");\nSELECT $f("prefix_", "whatever")'
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$f = ($x, $_) -> ($x || 'suffix');\nSELECT $f('prefix_', 'whatever')",
+            generated,
+        )
+
+    def test_expressions_doc_container_access(self):
+        self.validate_identity(
+            'SELECT t.struct.member, t.tuple.7, t.dict["key"], t.list[7] FROM my_table AS t',
+            write_sql=(
+                "SELECT t.struct.member AS member, t.tuple.7 AS `7`, "
+                "t.dict['key'], t.list[7] FROM `my_table` AS t"
+            ),
+        )
+        self.validate_identity("SELECT Sample::ReturnsStruct().member")
 
     # --- Named expressions $name = expr -------------------------------------
 

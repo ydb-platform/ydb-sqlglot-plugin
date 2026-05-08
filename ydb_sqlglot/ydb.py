@@ -7,7 +7,7 @@ from sqlglot import Generator, TokenType, exp, generator, parser, tokens, transf
 from sqlglot.dialects.dialect import Dialect, NormalizationStrategy, concat_to_dpipe_sql, unit_to_var
 from sqlglot.errors import UnsupportedError
 from sqlglot.expressions import Expression
-from sqlglot.helper import flatten, name_sequence, seq_get
+from sqlglot.helper import ensure_list, flatten, name_sequence, seq_get
 from sqlglot.optimizer.scope import ScopeType, find_in_scope, traverse_scope
 from sqlglot.optimizer.simplify import simplify
 from sqlglot.transforms import eliminate_join_marks, move_ctes_to_top_level
@@ -80,6 +80,11 @@ def _replace(expression, condition):
 
 _DATE_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _agg_alias_seq = iter(range(10_000))
+_YDB_STRING_SUFFIXES = {"s", "u", "y", "j"}
+_YDB_INTEGER_SUFFIXES = {"l", "s", "t", "u", "ul", "us", "ut", "lu"}
+_YDB_FLOAT_SUFFIXES = {"f"}
+_YDB_NUMBER_SUFFIXES = _YDB_INTEGER_SUFFIXES | _YDB_FLOAT_SUFFIXES
+_YDB_INTEGER_PREFIXES = ("x", "o", "b")
 
 
 def _alias_order_by_aggregates(expression: exp.Expression) -> None:
@@ -442,6 +447,54 @@ class YdbPostfixCall(exp.Expression):
     arg_types = {"this": True, "expressions": False}
 
 
+class YdbNamedTupleAssign(exp.Expression):
+    """YDB tuple-unpacking named expression assignment: $a, $b = AsTuple(...)."""
+    arg_types = {"this": True, "expressions": True}
+
+
+class YdbBitwiseRotLeft(exp.Expression):
+    """YDB circular left shift operator: a |< b."""
+    arg_types = {"this": True, "expression": True}
+
+
+class YdbBitwiseRotRight(exp.Expression):
+    """YDB circular right shift operator: a >| b."""
+    arg_types = {"this": True, "expression": True}
+
+
+class YdbSecondaryIndex(exp.Expression):
+    """YDB inline secondary index inside CREATE TABLE."""
+    arg_types = {
+        "this": True,
+        "scope": False,
+        "mode": False,
+        "using": False,
+        "columns": True,
+        "cover": False,
+        "with_storage": False,
+    }
+
+
+class YdbColumnFamilyConstraint(exp.Expression):
+    """YDB column-level FAMILY assignment."""
+    arg_types = {"this": True}
+
+
+class YdbColumnFamily(exp.Expression):
+    """YDB table-level FAMILY definition inside CREATE TABLE."""
+    arg_types = {"this": True, "expressions": True}
+
+
+class YdbTtlAction(exp.Expression):
+    """One YDB TTL interval/action pair."""
+    arg_types = {"this": True, "action": False, "target": False}
+
+
+class YdbTtlProperty(exp.Expression):
+    """YDB CREATE TABLE WITH TTL property."""
+    arg_types = {"this": True, "expressions": True, "unit": False}
+
+
 class YdbJsonValue(exp.Expression):
     """YDB JSON_VALUE with PASSING, RETURNING, ON EMPTY, and ON ERROR clauses."""
     arg_types = {
@@ -628,6 +681,7 @@ class YDB(Dialect):
             "ONLY": TokenType.ANTI,
             "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
             "STRING": TokenType.BLOB,     # YDB String = bytes = SQL BLOB
+            "LIST": TokenType.VAR,
         }
 
         SINGLE_TOKENS = {
@@ -641,8 +695,15 @@ class YDB(Dialect):
         STRING_ESCAPES = ["'", '"', "\\"]
         COMMENTS = ["--", ("/*", "*/")]
         IDENTIFIERS = ["`"]
+        IDENTIFIER_ESCAPES = ["\\"]
 
     class Parser(parser.Parser):
+        ARRAY_CONSTRUCTORS = {
+            key: value
+            for key, value in parser.Parser.ARRAY_CONSTRUCTORS.items()
+            if key != "LIST"
+        }
+
         COLUMN_OPERATORS = {
             **parser.Parser.COLUMN_OPERATORS,
             # In YDB :: is a module namespace separator (e.g. DateTime::GetYear),
@@ -687,6 +748,24 @@ class YDB(Dialect):
             **parser.Parser.NUMERIC_PARSERS,
             TokenType.NUMBER: lambda self, token: self._parse_ydb_number(token),
         }
+
+        def _parse_schema(self, this: t.Optional[exp.Expression] = None) -> t.Optional[exp.Expression]:
+            index = self._index
+            if not self._match(TokenType.L_PAREN):
+                return this
+
+            if self._match_set(self.SELECT_START_TOKENS):
+                self._retreat(index)
+                return this
+
+            args = self._parse_csv(
+                lambda: self._parse_constraint()
+                or self._parse_ydb_secondary_index()
+                or self._parse_ydb_column_family()
+                or self._parse_field_def()
+            )
+            self._match_r_paren()
+            return self.expression(exp.Schema(this=this, expressions=args))
 
         def parse(self, raw_tokens, sql=None):
             self.reset()
@@ -788,17 +867,36 @@ class YDB(Dialect):
             # Retreat one extra step to include '$' when falling back to expression parsing.
             index = self._index - 1
             name_var = self._parse_var(any_token=True)
+            names = [name_var] if name_var else []
+
+            while self._match(TokenType.COMMA):
+                if not self._match(TokenType.PARAMETER):
+                    self.raise_error("Expected named expression after comma")
+                next_name = self._parse_var(any_token=True)
+                if not next_name:
+                    self.raise_error("Expected named expression after '$'")
+                names.append(next_name)
+
             if not self._match(TokenType.EQ):
                 # Not an assignment — retreat (including '$') and parse as expression.
                 self._retreat(index)
                 return self._parse_expression()
+
             value = self._merge_ydb_number_suffix(
                 self._parse_select() or self._parse_expression()
             )
+            if len(names) > 1:
+                return self.expression(
+                    YdbNamedTupleAssign(
+                        this=value,
+                        expressions=[exp.Parameter(this=name) for name in names],
+                    )
+                )
+
             return self.expression(
                 exp.Alias(
                     this=value,
-                    alias=exp.Identifier(this=f"${name_var.name}"),
+                    alias=exp.Identifier(this=f"${names[0].name}"),
                 )
             )
 
@@ -855,12 +953,142 @@ class YDB(Dialect):
                 comments=comments,
             )
 
+        def _parse_ydb_secondary_index(self) -> t.Optional[YdbSecondaryIndex]:
+            if not self._match(TokenType.INDEX):
+                return None
+
+            name = self._parse_id_var(any_token=True)
+            if not name:
+                self.raise_error("Expected secondary index name")
+
+            scope = None
+            if self._curr and self._curr.text.upper() in ("GLOBAL", "LOCAL"):
+                scope = self._curr.text.upper()
+                self._advance()
+
+            mode = None
+            if self._curr and self._curr.text.upper() in ("SYNC", "ASYNC"):
+                mode = self._curr.text.upper()
+                self._advance()
+
+            using = self._parse_var(any_token=True) if self._match(TokenType.USING) else None
+
+            if not self._match(TokenType.ON):
+                self.raise_error("Expected ON in secondary index definition")
+
+            columns = self._parse_wrapped_csv(lambda: self._parse_id_var(any_token=True))
+            if not columns:
+                self.raise_error("Expected secondary index columns")
+
+            cover = None
+            if self._curr and self._curr.text.upper() == "COVER":
+                self._advance()
+                cover = self._parse_wrapped_csv(lambda: self._parse_id_var(any_token=True))
+
+            with_storage = None
+            if self._match(TokenType.WITH):
+                with_storage = self._parse_wrapped_properties()
+
+            return self.expression(
+                YdbSecondaryIndex(
+                    this=name,
+                    scope=scope,
+                    mode=mode,
+                    using=using,
+                    columns=columns,
+                    cover=cover,
+                    with_storage=with_storage,
+                )
+            )
+
+        def _parse_ydb_column_family(self) -> t.Optional[YdbColumnFamily]:
+            if not (self._curr and self._curr.text.upper() == "FAMILY"):
+                return None
+
+            self._advance()
+            name = self._parse_id_var(any_token=True)
+            if not name:
+                self.raise_error("Expected column family name")
+
+            properties = self._parse_wrapped_properties()
+            if not properties:
+                self.raise_error("Expected column family properties")
+
+            return self.expression(
+                YdbColumnFamily(this=name, expressions=properties)
+            )
+
+        def _parse_column_constraint(self) -> t.Optional[exp.Expression]:
+            if self._curr and self._curr.text.upper() == "FAMILY":
+                self._advance()
+                name = self._parse_id_var(any_token=True)
+                if not name:
+                    self.raise_error("Expected column family name")
+
+                return self.expression(
+                    exp.ColumnConstraint(
+                        kind=YdbColumnFamilyConstraint(this=name)
+                    )
+                )
+
+            return super()._parse_column_constraint()
+
+        def _parse_property(self) -> t.Optional[exp.Expression]:
+            if self._curr and self._curr.text.upper() == "TTL":
+                return self._parse_ydb_ttl_property()
+
+            return super()._parse_property()
+
+        def _parse_ydb_ttl_property(self) -> YdbTtlProperty:
+            self._advance()
+            if not self._match(TokenType.EQ):
+                self.raise_error("Expected = after TTL")
+
+            actions = [self._parse_ydb_ttl_action()]
+            while self._match(TokenType.COMMA):
+                actions.append(self._parse_ydb_ttl_action())
+
+            if not self._match(TokenType.ON):
+                self.raise_error("Expected ON in TTL property")
+
+            column = self._parse_column()
+            if not column:
+                self.raise_error("Expected TTL column")
+
+            unit = None
+            if self._match(TokenType.ALIAS):
+                unit = self._parse_var(any_token=True)
+                if not unit:
+                    self.raise_error("Expected TTL unit")
+
+            return self.expression(YdbTtlProperty(this=column, expressions=actions, unit=unit))
+
+        def _parse_ydb_ttl_action(self) -> YdbTtlAction:
+            interval = self._parse_bitwise()
+            if not interval:
+                self.raise_error("Expected TTL interval")
+
+            action = None
+            target = None
+            if self._curr and self._curr.text.upper() == "TO":
+                self._advance()
+                if not self._match_text_seq("EXTERNAL", "DATA", "SOURCE"):
+                    self.raise_error("Expected EXTERNAL DATA SOURCE after TTL TO")
+                target = self._parse_id_var(any_token=True)
+                if not target:
+                    self.raise_error("Expected external data source path")
+                action = "TO EXTERNAL DATA SOURCE"
+            elif self._match(TokenType.DELETE):
+                action = "DELETE"
+
+            return self.expression(YdbTtlAction(this=interval, action=action, target=target))
+
         def _parse_ydb_string(self, token: tokens.Token) -> exp.Literal:
             literal = self.expression(exp.Literal(this=token.text, is_string=True), token)
             if (
                 self._curr
                 and self._curr.token_type == TokenType.VAR
-                and self._curr.text.lower() in ("u", "j")
+                and self._curr.text.lower() in _YDB_STRING_SUFFIXES
                 and token.end + 1 == self._curr.start
             ):
                 literal.meta["ydb_string_suffix"] = self._curr.text
@@ -873,7 +1101,7 @@ class YDB(Dialect):
                 text == "0"
                 and self._curr
                 and self._curr.token_type == TokenType.VAR
-                and self._curr.text.lower().startswith("x")
+                and self._curr.text.lower().startswith(_YDB_INTEGER_PREFIXES)
                 and token.end + 1 == self._curr.start
             ):
                 text += self._curr.text
@@ -881,7 +1109,7 @@ class YDB(Dialect):
             elif (
                 self._curr
                 and self._curr.token_type == TokenType.VAR
-                and self._curr.text.lower() in ("u", "l", "ul", "lu")
+                and self._curr.text.lower() in _YDB_NUMBER_SUFFIXES
                 and token.end + 1 == self._curr.start
             ):
                 text += self._curr.text
@@ -897,8 +1125,20 @@ class YDB(Dialect):
                 lower_suffix = expression.alias.lower()
                 if (
                     isinstance(literal, exp.Literal)
+                    and literal.is_string
+                    and lower_suffix in _YDB_STRING_SUFFIXES
+                    and literal.meta.get("end") is not None
+                    and alias
+                    and alias.meta.get("start") is not None
+                    and literal.meta["end"] + 1 == alias.meta["start"]
+                ):
+                    literal.meta["ydb_string_suffix"] = expression.alias
+                    return literal
+
+                if (
+                    isinstance(literal, exp.Literal)
                     and not literal.is_string
-                    and lower_suffix in ("u", "l", "ul", "lu")
+                    and lower_suffix in _YDB_NUMBER_SUFFIXES
                     and literal.meta.get("end") is not None
                     and alias
                     and alias.meta.get("start") is not None
@@ -924,8 +1164,8 @@ class YDB(Dialect):
                 isinstance(literal, exp.Literal)
                 and not literal.is_string
                 and (
-                    (literal.this == "0" and lower_suffix.startswith("x"))
-                    or lower_suffix in ("u", "l", "ul", "lu")
+                    (literal.this == "0" and lower_suffix.startswith(_YDB_INTEGER_PREFIXES))
+                    or lower_suffix in _YDB_NUMBER_SUFFIXES
                 )
                 and literal.meta.get("end") is not None
                 and literal.meta["end"] + 1 == self._curr.start
@@ -941,10 +1181,11 @@ class YDB(Dialect):
             this: t.Optional[exp.Expression],
             explicit: bool = False,
         ) -> t.Optional[exp.Expression]:
-            return super()._parse_alias(
+            expression = super()._parse_alias(
                 self._merge_ydb_number_suffix(this),
                 explicit=explicit,
             )
+            return self._merge_ydb_number_suffix(expression)
 
         def _parse_ydb_json_value(self) -> YdbJsonValue:
             this = self._parse_bitwise()
@@ -1670,6 +1911,27 @@ class YDB(Dialect):
         def _parse_primary(self) -> t.Optional[exp.Expression]:
             if (
                 self._curr
+                and self._curr.token_type in (TokenType.BLOB, TokenType.TEXT)
+                and self._next
+                and self._next.token_type == TokenType.DCOLON
+            ):
+                namespace = self._curr.text
+                self._advance()
+                self._advance()
+                field = self._parse_dcolon()
+                if isinstance(field, exp.Func):
+                    return self.expression(
+                        exp.Anonymous(
+                            this=f"{namespace}::{field.name}",
+                            expressions=field.expressions,
+                        )
+                    )
+                return self.expression(
+                    exp.ScopeResolution(this=exp.to_identifier(namespace), expression=field)
+                )
+
+            if (
+                self._curr
                 and self._curr.token_type == TokenType.LT
                 and self._next
                 and self._next.token_type == TokenType.PIPE
@@ -1784,6 +2046,38 @@ class YDB(Dialect):
             return False
 
         def _parse_at_raw_string(self) -> YdbAtString:
+            start = self._curr.start
+            raw_sql = self.sql or ""
+
+            if raw_sql and start is not None:
+                i = start + 2
+                parts = []
+
+                while i < len(raw_sql):
+                    if raw_sql.startswith("@@@@", i):
+                        parts.append("@@@@")
+                        i += 4
+                        continue
+
+                    if raw_sql.startswith("@@", i):
+                        closing_end = i + 1
+                        while self._curr and self._curr.start <= closing_end:
+                            self._advance()
+
+                        literal = self.expression(YdbAtString(this="".join(parts)))
+                        if (
+                            self._curr
+                            and self._curr.token_type == TokenType.VAR
+                            and self._curr.text.lower() in _YDB_STRING_SUFFIXES
+                            and closing_end + 1 == self._curr.start
+                        ):
+                            literal.meta["ydb_string_suffix"] = self._curr.text
+                            self._advance()
+                        return literal
+
+                    parts.append(raw_sql[i])
+                    i += 1
+
             self._advance()
             self._advance()
 
@@ -1801,7 +2095,15 @@ class YDB(Dialect):
                 parts.append(self._curr.text)
                 self._advance()
 
-            return self.expression(YdbAtString(this="".join(parts)))
+            literal = self.expression(YdbAtString(this="".join(parts)))
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.VAR
+                and self._curr.text.lower() in _YDB_STRING_SUFFIXES
+            ):
+                literal.meta["ydb_string_suffix"] = self._curr.text
+                self._advance()
+            return literal
 
         def _parse_lambda_body(self, params):
             if (
@@ -1848,6 +2150,104 @@ class YDB(Dialect):
 
             return self.expression(exp.Lambda(this=body, expressions=params))
 
+        def _parse_bitwise(self) -> t.Optional[exp.Expression]:
+            this = self._parse_term()
+
+            while True:
+                if self._match_pair(TokenType.PIPE, TokenType.LT):
+                    this = self.expression(
+                        YdbBitwiseRotLeft(this=this, expression=self._parse_term())
+                    )
+                elif self._match_pair(TokenType.GT, TokenType.PIPE):
+                    this = self.expression(
+                        YdbBitwiseRotRight(this=this, expression=self._parse_term())
+                    )
+                elif self._match_set(self.BITWISE):
+                    this = self.expression(
+                        self.BITWISE[self._prev.token_type](
+                            this=this,
+                            expression=self._parse_term(),
+                        )
+                    )
+                elif self.dialect.DPIPE_IS_STRING_CONCAT and self._match(TokenType.DPIPE):
+                    this = self.expression(
+                        exp.DPipe(
+                            this=this,
+                            expression=self._parse_term(),
+                            safe=not self.dialect.STRICT_STRING_CONCAT,
+                        )
+                    )
+                elif self._match(TokenType.DQMARK):
+                    this = self.expression(
+                        exp.Coalesce(this=this, expressions=ensure_list(self._parse_term()))
+                    )
+                elif self._match_pair(TokenType.LT, TokenType.LT):
+                    this = self.expression(
+                        exp.BitwiseLeftShift(this=this, expression=self._parse_term())
+                    )
+                elif self._match_pair(TokenType.GT, TokenType.GT):
+                    this = self.expression(
+                        exp.BitwiseRightShift(this=this, expression=self._parse_term())
+                    )
+                else:
+                    break
+
+            return this
+
+        def _parse_range(self, this: t.Optional[exp.Expression] = None) -> t.Optional[exp.Expression]:
+            this = this or self._parse_bitwise()
+            negate = self._match(TokenType.NOT)
+
+            if self._match_text_seq("MATCH"):
+                expression = self.expression(
+                    exp.RegexpLike(this=this, expression=self._parse_bitwise())
+                )
+                expression.meta["ydb_regexp_function"] = "Re2::Match"
+                this = expression
+            elif self._match_set(self.RANGE_PARSERS):
+                expression = self.RANGE_PARSERS[self._prev.token_type](self, this)
+                if not expression:
+                    return this
+
+                this = expression
+            elif self._match(TokenType.ISNULL) or (negate and self._match(TokenType.NULL)):
+                this = self.expression(exp.Is(this=this, expression=exp.Null()))
+
+            if self._match(TokenType.NOTNULL):
+                this = self.expression(exp.Is(this=this, expression=exp.Null()))
+                this = self.expression(exp.Not(this=this))
+
+            if negate:
+                this = self._negate_range(this)
+
+            if self._match(TokenType.IS):
+                this = self._parse_is(this)
+
+            return this
+
+        def _parse_logical_xor(self) -> t.Optional[exp.Expression]:
+            this = self._parse_equality()
+            while self._match(TokenType.XOR):
+                comments = self._prev_comments
+                this = self.expression(
+                    exp.Xor(this=this, expression=self._parse_equality()),
+                    comments=comments,
+                )
+            return this
+
+        def _parse_conjunction(self) -> t.Optional[exp.Expression]:
+            this = self._parse_logical_xor()
+            while self._match_set(self.CONJUNCTION):
+                comments = self._prev_comments
+                this = self.expression(
+                    self.CONJUNCTION[self._prev.token_type](
+                        this=this,
+                        expression=self._parse_logical_xor(),
+                    ),
+                    comments=comments,
+                )
+            return this
+
         def _parse_in(self, this: t.Optional[exp.Expression], alias: bool = False) -> exp.In:
             if self._match_text_seq("COMPACT"):
                 expression = self.expression(exp.In(this=this, field=self._parse_column()))
@@ -1883,6 +2283,10 @@ class YDB(Dialect):
         NULL_ORDERING_SUPPORTED: t.Optional[bool] = False
         NULL_ORDERING = None
         MATCHED_BY_SOURCE = False
+        PROPERTIES_LOCATION = {
+            **generator.Generator.PROPERTIES_LOCATION,
+            YdbTtlProperty: exp.Properties.Location.POST_WITH,
+        }
 
         def __init__(self, **kwargs):
             """
@@ -2063,7 +2467,8 @@ class YDB(Dialect):
             return f"Optional<{sql}>" if expression.args.get("nullable") else sql
 
         def ydbatstring_sql(self, expression: YdbAtString) -> str:
-            return f"@@{expression.this}@@"
+            suffix = expression.meta.get("ydb_string_suffix") or ""
+            return f"@@{expression.this}@@{suffix}"
 
         def ydbstructliteral_sql(self, expression: YdbStructLiteral) -> str:
             fields = []
@@ -2075,6 +2480,79 @@ class YDB(Dialect):
             this = self.sql(expression, "this")
             args = self.expressions(expression, flat=True)
             return f"{this}({args})"
+
+        def ydbnamedtupleassign_sql(self, expression: YdbNamedTupleAssign) -> str:
+            names = ", ".join(self.sql(name) for name in expression.expressions)
+            return f"{names} = {self.sql(expression, 'this')}"
+
+        def ydbbitwiserotleft_sql(self, expression: YdbBitwiseRotLeft) -> str:
+            return f"{self.sql(expression, 'this')} |< {self.sql(expression, 'expression')}"
+
+        def ydbbitwiserotright_sql(self, expression: YdbBitwiseRotRight) -> str:
+            return f"{self.sql(expression, 'this')} >| {self.sql(expression, 'expression')}"
+
+        def ydbsecondaryindex_sql(self, expression: YdbSecondaryIndex) -> str:
+            parts = [f"INDEX {self.sql(expression, 'this')}"]
+
+            scope = expression.args.get("scope")
+            if scope:
+                parts.append(scope)
+
+            mode = expression.args.get("mode")
+            if mode:
+                parts.append(mode)
+
+            using = self.sql(expression, "using")
+            if using:
+                parts.append(f"USING {using}")
+
+            columns = ", ".join(self.sql(column) for column in expression.args["columns"])
+            parts.append(f"ON ({columns})")
+
+            cover = expression.args.get("cover")
+            if cover:
+                cover_columns = ", ".join(self.sql(column) for column in cover)
+                parts.append(f"COVER ({cover_columns})")
+
+            with_storage = expression.args.get("with_storage")
+            if with_storage:
+                properties = (
+                    with_storage.expressions
+                    if isinstance(with_storage, exp.Properties)
+                    else with_storage
+                )
+                properties_sql = ", ".join(self.sql(prop) for prop in properties)
+                parts.append(f"WITH ({properties_sql})")
+
+            return " ".join(parts)
+
+        def ydbcolumnfamilyconstraint_sql(self, expression: YdbColumnFamilyConstraint) -> str:
+            return f"FAMILY {self.sql(expression, 'this')}"
+
+        def ydbcolumnfamily_sql(self, expression: YdbColumnFamily) -> str:
+            properties_sql = ", ".join(self.sql(prop) for prop in expression.expressions)
+            return f"FAMILY {self.sql(expression, 'this')} ({properties_sql})"
+
+        def ydbttlaction_sql(self, expression: YdbTtlAction) -> str:
+            sql = self.sql(expression, "this")
+            action = expression.args.get("action")
+            if action == "DELETE":
+                return f"{sql} DELETE"
+            if action == "TO EXTERNAL DATA SOURCE":
+                return f"{sql} TO EXTERNAL DATA SOURCE {self.sql(expression, 'target')}"
+            return sql
+
+        def ydbttlproperty_sql(self, expression: YdbTtlProperty) -> str:
+            actions = ", ".join(self.sql(action) for action in expression.expressions)
+            sql = f"TTL={actions} ON {self.sql(expression, 'this')}"
+            unit = self.sql(expression, "unit")
+            if unit:
+                sql = f"{sql} AS {unit}"
+            return sql
+
+        def regexplike_sql(self, expression: exp.RegexpLike) -> str:
+            func = expression.meta.get("ydb_regexp_function") or "Re2::Grep"
+            return f"{func}({self.sql(expression, 'expression')})({self.sql(expression, 'this')})"
 
         def ydbjsonvalue_sql(self, expression: YdbJsonValue) -> str:
             args = [self.sql(expression, "this"), self.sql(expression, "path")]
@@ -2523,7 +3001,9 @@ class YDB(Dialect):
         def _generate_create_table(self, expression: exp.Expression) -> str:
             """
             Generate CREATE TABLE SQL with YDB-specific syntax.
-            Handles primary keys, constraints, and partitioning.
+            Keeps YDB's explicit CREATE TABLE shape: the PRIMARY KEY must be
+            present in the schema, while PARTITION BY HASH and WITH settings
+            are emitted only when they are present in the source.
 
             Args:
                 expression: The CREATE TABLE expression
@@ -2548,80 +3028,79 @@ class YDB(Dialect):
                 else:
                     expression.set("properties", None)
 
-            # Clean up index parts from table
-            for ex in list(expression.this.expressions):
-                if isinstance(ex, exp.Identifier):
-                    ex.pop()
-
-            def enforce_not_null(col):
-                """Add NOT NULL constraint if not present"""
-                for constraint in col.constraints:
-                    if isinstance(constraint.kind, exp.NotNullColumnConstraint):
-                        break
-                else:
-                    col.append(
-                        "constraints", exp.ColumnConstraint(kind=exp.NotNullColumnConstraint())
-                    )
-
-            def enforce_pk(col):
-                """Add PRIMARY KEY constraint if not present"""
-                for constraint in col.constraints:
-                    if isinstance(constraint.kind, exp.PrimaryKeyColumnConstraint):
-                        break
-                else:
-                    col.append(
-                        "constraints", exp.ColumnConstraint(kind=exp.PrimaryKeyColumnConstraint())
-                    )
-
             pks = list(expression.find_all(exp.PrimaryKey))
-            if len(pks) > 0:
-                for pk in pks:
-                    for pk_ex in pk.expressions:
-                        pk_cols = [
-                            col
-                            for col in expression.this.find_all(exp.ColumnDef)
-                            if col.alias_or_name.lower() == pk_ex.alias_or_name.lower()
-                        ]
-                        if len(pk_cols) > 0:
-                            col = pk_cols[0]
-                            enforce_not_null(col)
-                            enforce_pk(col)
-                    pk.pop()
+            if not any(pk.expressions for pk in pks):
+                raise UnsupportedError("YDB CREATE TABLE requires a non-empty PRIMARY KEY")
 
-            def is_pk(col):
-                """Check if a column has a PRIMARY KEY constraint"""
-                for constraint in col.constraints:
-                    if isinstance(constraint, exp.ColumnConstraint):
-                        if isinstance(constraint.kind, exp.PrimaryKeyColumnConstraint):
-                            return True
-                return False
+            has_secondary_indexes = any(expression.find_all(YdbSecondaryIndex))
+            is_create_as_select = expression.args.get("expression") is not None
+            column_store = False
+            props = expression.args.get("properties")
+            if props:
+                for prop in props.expressions:
+                    if (
+                        isinstance(prop, exp.Property)
+                        and self.sql(prop, "this").upper() == "STORE"
+                        and self.sql(prop, "value").upper() == "COLUMN"
+                    ):
+                        column_store = True
+                        break
 
-            for col in expression.find_all(exp.ColumnDef):
-                if is_pk(col):
-                    break
-            else:
-                col = list(expression.find_all(exp.ColumnDef))[0]
-                enforce_pk(col)
+            for family in expression.find_all(YdbColumnFamily):
+                for prop in family.expressions:
+                    if not isinstance(prop, exp.Property):
+                        continue
 
-            for col in expression.this.find_all(exp.ColumnDef):
-                if is_pk(col):
-                    enforce_not_null(col)
+                    name = self.sql(prop, "this").upper()
+                    value = self.sql(prop, "value").strip("'\"").lower()
+                    if column_store and name == "DATA":
+                        raise UnsupportedError("YDB column family DATA is supported only for row-oriented tables")
+                    if not column_store and name == "COMPRESSION_LEVEL":
+                        raise UnsupportedError("YDB column family COMPRESSION_LEVEL is supported only for column-oriented tables")
+                    if not column_store and name == "COMPRESSION" and value == "zstd":
+                        raise UnsupportedError("YDB column family COMPRESSION='zstd' is supported only for column-oriented tables")
 
-            for constraint in list(expression.this.find_all(exp.Constraint)):
-                constraint.pop()
+            if not column_store:
+                for ttl_action in expression.find_all(YdbTtlAction):
+                    if ttl_action.args.get("action") == "TO EXTERNAL DATA SOURCE":
+                        raise UnsupportedError("YDB TTL eviction to external data source is supported only for column-oriented tables")
 
-            sql = super().generate(expression)
+            partition_sql = None
+            if props:
+                if has_secondary_indexes and not is_create_as_select:
+                    for prop in props.expressions:
+                        if (
+                            isinstance(prop, exp.Property)
+                            and self.sql(prop, "this").upper() == "STORE"
+                            and self.sql(prop, "value").upper() == "COLUMN"
+                        ):
+                            raise UnsupportedError("YDB secondary indexes are supported only for row-oriented tables")
 
-            pk_s = []
-            for col in expression.find_all(exp.ColumnDef):
-                if is_pk(col):
-                    pk_s.append(col.alias_or_name)
+                keep = []
+                for prop in props.expressions:
+                    if isinstance(prop, exp.PartitionedByProperty):
+                        partition_sql = f"PARTITION BY {self.sql(prop, 'this')}"
+                    else:
+                        keep.append(prop)
 
-            if not pk_s:
-                raise ValueError("No primary key columns found")
-            ind = sql.rfind(")")
-            col_names = ",".join([f"`{pk}`" for pk in pk_s])
-            sql = sql[:ind] + f", PRIMARY KEY({col_names}))\nPARTITION BY HASH ({col_names});"
+                if len(keep) != len(props.expressions):
+                    if keep:
+                        props.set("expressions", keep)
+                    else:
+                        expression.set("properties", None)
+
+            sql = self.create_sql(expression)
+
+            if partition_sql:
+                if " WITH " in sql:
+                    head, tail = sql.split(" WITH ", 1)
+                    sql = f"{head} {partition_sql} WITH {tail}"
+                elif " AS " in sql:
+                    head, tail = sql.split(" AS ", 1)
+                    sql = f"{head} {partition_sql} AS {tail}"
+                else:
+                    sql = f"{sql} {partition_sql}"
+
             return sql
 
         def generate(self, expression: exp.Expression, copy: bool = True) -> str:
@@ -4070,6 +4549,8 @@ class YDB(Dialect):
         def not_sql(self, expression: exp.Not) -> str:
             """YDB requires explicit parentheses around LIKE inside NOT."""
             inner = expression.this
+            if isinstance(inner, exp.Is) and isinstance(inner.expression, exp.Null):
+                return f"{self.sql(inner, 'this')} IS NOT NULL"
             if isinstance(inner, (exp.Like, exp.ILike, exp.SimilarTo)):
                 return f"NOT ({self.sql(inner)})"
             return super().not_sql(expression)
@@ -4150,6 +4631,14 @@ class YDB(Dialect):
             YdbAtString: lambda self, e: self.ydbatstring_sql(e),
             YdbStructLiteral: lambda self, e: self.ydbstructliteral_sql(e),
             YdbPostfixCall: lambda self, e: self.ydbpostfixcall_sql(e),
+            YdbNamedTupleAssign: lambda self, e: self.ydbnamedtupleassign_sql(e),
+            YdbBitwiseRotLeft: lambda self, e: self.ydbbitwiserotleft_sql(e),
+            YdbBitwiseRotRight: lambda self, e: self.ydbbitwiserotright_sql(e),
+            YdbSecondaryIndex: lambda self, e: self.ydbsecondaryindex_sql(e),
+            YdbColumnFamilyConstraint: lambda self, e: self.ydbcolumnfamilyconstraint_sql(e),
+            YdbColumnFamily: lambda self, e: self.ydbcolumnfamily_sql(e),
+            YdbTtlAction: lambda self, e: self.ydbttlaction_sql(e),
+            YdbTtlProperty: lambda self, e: self.ydbttlproperty_sql(e),
             YdbJsonExists: lambda self, e: self.ydbjsonexists_sql(e),
             YdbJsonQuery: lambda self, e: self.ydbjsonquery_sql(e),
             YdbJsonValue: lambda self, e: self.ydbjsonvalue_sql(e),
@@ -4185,6 +4674,7 @@ class YDB(Dialect):
             exp.StrPosition: rename_func_not_normalize("Find"),
             exp.Length: rename_func_not_normalize("Unicode::GetLength"),
             exp.Unnest: rename_func_not_normalize("FLATTEN BY"),
+            exp.RegexpLike: regexplike_sql,
             # exp.Round handled by round_sql (precision sign must be negated)
             exp.Set: _set_sql,
             exp.Group: _group_by,
