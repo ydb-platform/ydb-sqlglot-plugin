@@ -452,6 +452,11 @@ class YdbNamedTupleAssign(exp.Expression):
     arg_types = {"this": True, "expressions": True}
 
 
+class YdbUpdateOn(exp.Expression):
+    """YDB UPDATE ... ON statement using rows produced by a query."""
+    arg_types = {"this": True, "expression": True}
+
+
 class YdbBitwiseRotLeft(exp.Expression):
     """YDB circular left shift operator: a |< b."""
     arg_types = {"this": True, "expression": True}
@@ -682,6 +687,7 @@ class YDB(Dialect):
             "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
             "STRING": TokenType.BLOB,     # YDB String = bytes = SQL BLOB
             "LIST": TokenType.VAR,
+            "UPSERT": TokenType.INSERT,
         }
 
         SINGLE_TOKENS = {
@@ -899,6 +905,26 @@ class YDB(Dialect):
                     alias=exp.Identifier(this=f"${names[0].name}"),
                 )
             )
+
+        def _parse_update(self) -> exp.Expression:
+            index = self._index
+            table = self._parse_table(joins=True, alias_tokens=self.UPDATE_ALIAS_TOKENS)
+
+            if table and self._match(TokenType.ON):
+                query = self._parse_select() or self._parse_expression()
+                if not query:
+                    self.raise_error("Expected query after UPDATE ... ON")
+                return self.expression(YdbUpdateOn(this=table, expression=query))
+
+            self._retreat(index)
+            return super()._parse_update()
+
+        def _parse_insert(self) -> t.Union[exp.Insert, exp.MultitableInserts]:
+            is_upsert = bool(self._prev and self._prev.text.upper() == "UPSERT")
+            insert = super()._parse_insert()
+            if is_upsert:
+                insert.meta["ydb_upsert"] = True
+            return insert
 
         def _parse_lambda_arg(self) -> t.Optional[exp.Expression]:
             if self._match(TokenType.PARAMETER):
@@ -1576,6 +1602,16 @@ class YDB(Dialect):
                 )
 
             if self._match(TokenType.PARTITION):
+                if any("COMPACT" in comment.upper() for comment in self._prev_comments):
+                    self._ydb_window_partition_compact = True
+                    if not self._match_text_seq("BY"):
+                        self.raise_error("Expected BY after PARTITION COMPACT hint")
+                    if self._match_pair(TokenType.L_PAREN, TokenType.R_PAREN):
+                        return []
+                    return self._parse_csv(
+                        lambda: self._parse_alias(self._parse_disjunction(), explicit=True)
+                    )
+
                 if not self._match_text_seq("COMPACT", "BY"):
                     self.raise_error("Expected COMPACT BY after PARTITION")
 
@@ -2354,8 +2390,22 @@ class YDB(Dialect):
                 var = self.sql(expression, "this")
                 alias = f" AS {expression.alias}" if expression.alias else ""
                 return _with_table_joins(f"{var}{alias}")
+            if isinstance(expression.this, exp.Like):
+                table_func = expression.this
+                sql = self.func("LIKE", table_func.expression, table_func.this, normalize=False)
+                if expression.alias:
+                    sql += f" AS {expression.alias}"
+                return _with_table_joins(sql)
             if isinstance(expression.this, exp.Func):
-                sql = self.sql(expression, "this")
+                table_func = expression.this
+                if isinstance(table_func, exp.Concat):
+                    sql = self.func("CONCAT", *table_func.expressions, normalize=False)
+                elif isinstance(table_func, exp.ArrayFilter):
+                    sql = self.func("FILTER", table_func.this, table_func.expression, normalize=False)
+                else:
+                    sql = self.sql(expression, "this")
+                if expression.db:
+                    sql = f"{expression.db}.{sql}"
                 hints = expression.args.get("hints") or []
                 if hints and isinstance(hints[0], exp.Var) and hints[0].this.startswith("WITH"):
                     sql += f" {hints[0].this}"
@@ -2484,6 +2534,15 @@ class YDB(Dialect):
         def ydbnamedtupleassign_sql(self, expression: YdbNamedTupleAssign) -> str:
             names = ", ".join(self.sql(name) for name in expression.expressions)
             return f"{names} = {self.sql(expression, 'this')}"
+
+        def ydbupdateon_sql(self, expression: YdbUpdateOn) -> str:
+            return f"UPDATE {self.sql(expression, 'this')} ON {self.sql(expression, 'expression')}"
+
+        def insert_sql(self, expression: exp.Insert) -> str:
+            sql = super().insert_sql(expression)
+            if expression.meta.get("ydb_upsert") and sql.startswith("INSERT"):
+                return f"UPSERT{sql[len('INSERT'):]}"
+            return sql
 
         def ydbbitwiserotleft_sql(self, expression: YdbBitwiseRotLeft) -> str:
             return f"{self.sql(expression, 'this')} |< {self.sql(expression, 'expression')}"
@@ -3168,6 +3227,8 @@ class YDB(Dialect):
                         #   $rows = (SELECT id FROM t WHERE <condition>);
                         #   UPDATE t SET ... WHERE id IN (SELECT id FROM $rows);
                         dml = select.find_ancestor(exp.Update, exp.Insert)
+                        if isinstance(dml, exp.Insert) and dml.args.get("expression") is select:
+                            continue
                         if dml is not None:
                             kind = type(dml).__name__.upper()
                             raise UnsupportedError(
@@ -3705,7 +3766,7 @@ class YDB(Dialect):
             exp.DataType.Type.VARCHAR: "Utf8",
         }
 
-        def _date_trunc_sql(self, expression: exp.DateTrunc) -> str:
+        def _date_trunc_sql(self, expression: exp.Expression) -> str:
             """
             Generate SQL for DATE_TRUNC function with YDB-specific implementation.
 
@@ -4359,9 +4420,13 @@ class YDB(Dialect):
 
             mapping = {
                 "DAY": f"DateTime::IntervalFromDays({value})",
+                "DAYS": f"DateTime::IntervalFromDays({value})",
                 "HOUR": f"DateTime::IntervalFromHours({value})",
+                "HOURS": f"DateTime::IntervalFromHours({value})",
                 "MINUTE": f"DateTime::IntervalFromMinutes({value})",
+                "MINUTES": f"DateTime::IntervalFromMinutes({value})",
                 "SECOND": f"DateTime::IntervalFromSeconds({value})",
+                "SECONDS": f"DateTime::IntervalFromSeconds({value})",
             }
             if unit in mapping:
                 return mapping[unit]
@@ -4391,6 +4456,14 @@ class YDB(Dialect):
                 return f"(CAST({end} AS Int64) - CAST({start} AS Int64)) / {factor}"
             self.unsupported(f"DateDiff unit not supported: {unit}")
             return f"(CAST({end} AS Int64) - CAST({start} AS Int64))"
+
+        def _array_contains_all(self, expression: exp.ArrayContainsAll) -> str:
+            return self.func(
+                "Yson::Contains",
+                expression.this,
+                expression.expression,
+                normalize=False,
+            )
 
         def _arrayany(self, expression: exp.ArrayAny) -> str:
             """
@@ -4632,6 +4705,7 @@ class YDB(Dialect):
             YdbStructLiteral: lambda self, e: self.ydbstructliteral_sql(e),
             YdbPostfixCall: lambda self, e: self.ydbpostfixcall_sql(e),
             YdbNamedTupleAssign: lambda self, e: self.ydbnamedtupleassign_sql(e),
+            YdbUpdateOn: lambda self, e: self.ydbupdateon_sql(e),
             YdbBitwiseRotLeft: lambda self, e: self.ydbbitwiserotleft_sql(e),
             YdbBitwiseRotRight: lambda self, e: self.ydbbitwiserotright_sql(e),
             YdbSecondaryIndex: lambda self, e: self.ydbsecondaryindex_sql(e),
@@ -4664,7 +4738,9 @@ class YDB(Dialect):
             exp.DateAdd: _date_add,
             exp.DateSub: _date_add,
             exp.DateDiff: _date_diff,
+            exp.TimestampTrunc: _date_trunc_sql,
             exp.JSONBContains: rename_func_not_normalize("Yson::Contains"),
+            exp.ArrayContainsAll: _array_contains_all,
             exp.ForeignKey: lambda self, e: self.unsupported("constraint not supported"),
             exp.StringToArray: rename_func_not_normalize("String::SplitToList"),
             exp.Array: rename_func_not_normalize("AsList"),

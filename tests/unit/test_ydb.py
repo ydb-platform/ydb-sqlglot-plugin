@@ -91,6 +91,74 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_select_overview_doc_examples(self):
+        self.validate_identity("SELECT 'Hello, world!'")
+        self.validate_identity("SELECT 2 + 2")
+
+    def test_select_overview_doc_ordered_columns_pragma(self):
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse("PRAGMA OrderedColumns;\nSELECT key, value FROM `my_table`", dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual("PRAGMA OrderedColumns;\nSELECT key, value FROM `my_table`", generated)
+
+    def test_select_overview_doc_multi_table_functions(self):
+        cases = [
+            "SELECT * FROM CONCAT(`table1`, `table2`, `table3`)",
+            "SELECT * FROM EACH($tables)",
+            "SELECT * FROM RANGE(`my_folder`)",
+            "SELECT * FROM some_cluster.RANGE(`my_folder`, `from_table`, `to_table`)",
+            "SELECT * FROM RANGE(`my_folder`, `from_folder`, `to_folder`, `my_table`)",
+            "SELECT * FROM RANGE(`my_folder`, `from_table`, `to_table`, ``, `my_view`)",
+            "SELECT * FROM LIKE(`my_folder`, '2017-03-%')",
+            "SELECT * FROM REGEXP(`my_folder`, '2017-03-1[2-4]?')",
+            "SELECT * FROM FILTER(`my_folder`, $callable)",
+        ]
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.validate_identity(sql)
+
+    def test_from_doc_snippets(self):
+        self.validate_identity("SELECT key FROM `my_table`")
+        self.validate_identity("SELECT * FROM (SELECT value FROM `my_table`)")
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse("$table_name = 'my_table';\nSELECT * FROM $table_name", dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual("$table_name = 'my_table';\nSELECT * FROM $table_name", generated)
+
+    def test_from_as_table_doc_snippet(self):
+        sql = (
+            "$data = AsList(\n"
+            "    AsStruct(1u AS Key, 'v1' AS Value),\n"
+            "    AsStruct(2u AS Key, 'v2' AS Value),\n"
+            "    AsStruct(3u AS Key, 'v3' AS Value));\n\n"
+            "SELECT Key, Value FROM AS_TABLE($data);"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb")
+            if expression is not None
+        )
+        self.assertEqual(
+            "$data = AsList(AsStruct(1u AS Key, 'v1' AS Value), "
+            "AsStruct(2u AS Key, 'v2' AS Value), AsStruct(3u AS Key, 'v3' AS Value));\n"
+            "SELECT Key, Value FROM AS_TABLE($data)",
+            generated,
+        )
+
+    def test_from_select_doc_snippets(self):
+        self.validate_identity(
+            "FROM `my_table` SELECT key, value",
+            write_sql="SELECT key, value FROM `my_table`",
+        )
+        self.validate_identity(
+            "FROM `a_table` AS a JOIN `b_table` AS b USING (key) SELECT *",
+            write_sql="SELECT * FROM `a_table` AS a JOIN `b_table` AS b USING (key)",
+        )
+
     def test_unique_distinct_hints(self):
         cases = [
             "SELECT /*+ unique */ id FROM `table`",
@@ -384,6 +452,12 @@ class TestYDBIdentity(Validator):
             with self.subTest(sql=sql):
                 self.validate_identity(sql)
 
+    def test_window_doc_partition_compact_hint(self):
+        self.validate_identity(
+            "SELECT COUNT(*) OVER w FROM `my_table` WINDOW w AS (PARTITION /*+ COMPACT() */ BY key)",
+            write_sql="SELECT COUNT(*) OVER w FROM `my_table` WINDOW w AS (PARTITION COMPACT BY key)",
+        )
+
     def test_window_frame_begin_defaults_to_current_row(self):
         cases = [
             (
@@ -475,6 +549,45 @@ class TestYDBTransforms(Validator):
             "INNER JOIN `users` VIEW name_index AS t2 "
             "ON t1.uploaded_user_id = t2.user_id "
             "WHERE t2.name = userName",
+        )
+
+    def test_vector_index_doc_pragma_snippet(self):
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(
+                'PRAGMA ydb.KMeansTreeSearchTopSize="10";\n'
+                "SELECT * FROM `TableName` VIEW IndexName "
+                "ORDER BY Knn::CosineDistance(embedding, $target) LIMIT 10",
+                dialect="ydb",
+            )
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA ydb.KMeansTreeSearchTopSize = '10';\n"
+            "SELECT * FROM `TableName` VIEW IndexName "
+            "ORDER BY Knn::CosineDistance(embedding, $target) LIMIT 10",
+            generated,
+        )
+
+    def test_vector_index_doc_similarity_snippet(self):
+        self.validate_identity(
+            "SELECT series_id, title, info, release_date, views, uploaded_user_id, "
+            "Knn::CosineSimilarity(embedding, $target) AS similarity "
+            "FROM `series` VIEW views_index ORDER BY similarity DESC LIMIT 10"
+        )
+
+    def test_vector_index_doc_filtered_snippet(self):
+        self.validate_identity(
+            "SELECT series_id, title, info, release_date, views, uploaded_user_id, "
+            "Knn::CosineSimilarity(embedding, $target) AS similarity "
+            "FROM `series` VIEW views_filtered_index "
+            "WHERE release_date = '2025-03-31' ORDER BY similarity DESC LIMIT 10",
+            write_sql=(
+                "SELECT series_id, title, info, release_date, views, uploaded_user_id, "
+                "Knn::CosineSimilarity(embedding, $target) AS similarity "
+                "FROM `series` VIEW views_filtered_index "
+                "WHERE release_date = CAST('2025-03-31' AS DATE) ORDER BY similarity DESC LIMIT 10"
+            ),
         )
 
     def test_table_with_source_options(self):
@@ -1252,6 +1365,25 @@ class TestYDBTransforms(Validator):
         with self.assertRaises(UnsupportedError):
             parse_one(sql, dialect="sqlite").sql(dialect="ydb")
 
+    def test_update_doc_set_where_snippet(self):
+        self.validate_identity(
+            "UPDATE `my_table` SET Value1 = YQL::ToString(Value2 + 1), Value2 = Value2 - 1 WHERE Key1 > 1"
+        )
+
+    def test_update_doc_returning_all_snippet(self):
+        self.assertEqual(
+            self.parse_one(
+                "UPDATE `orders` SET status = 'shipped' WHERE order_date < '2023-01-01' RETURNING *"
+            ).sql(dialect="ydb"),
+            "UPDATE `orders` SET status = 'shipped' WHERE order_date < CAST('2023-01-01' AS DATE) RETURNING *",
+        )
+
+    def test_update_doc_returning_columns_snippet(self):
+        self.validate_identity(
+            "UPDATE `products` SET price = price * 0.9 "
+            "WHERE category = 'Electronics' RETURNING product_id, name, price AS new_price",
+        )
+
 
 # ---------------------------------------------------------------------------
 # YDB parser: new syntax features parsed and round-tripped
@@ -1292,6 +1424,50 @@ class TestYDBParser(Validator):
 
     def test_dollar_variable_in_select(self):
         self.validate_identity("SELECT $limit FROM `table`")
+
+    # --- UPDATE ON ----------------------------------------------------------
+
+    def test_update_on_doc_snippet(self):
+        sql = (
+            "$to_update = (\n"
+            "    SELECT Key, SubKey, \"Updated\" AS Value FROM `my_table`\n"
+            "    WHERE Key = 1\n"
+            ");\n\n"
+            "UPDATE `my_table` ON\n"
+            "SELECT * FROM $to_update;"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(
+            "$to_update = (SELECT Key, SubKey, 'Updated' AS Value FROM `my_table` WHERE Key = 1);\n"
+            "UPDATE `my_table` ON SELECT * FROM $to_update",
+            generated,
+        )
+
+    def test_update_on_roundtrip_stable(self):
+        self.assert_roundtrip_stable("UPDATE `my_table` ON SELECT * FROM $to_update")
+
+    # --- UPSERT INTO --------------------------------------------------------
+
+    def test_upsert_into_doc_select_snippet(self):
+        self.validate_identity(
+            "UPSERT INTO `my_table` SELECT pk_column, data_column1, col24 AS data_column3 FROM `other_table`",
+        )
+
+    def test_upsert_into_doc_values_snippet(self):
+        self.validate_identity(
+            "UPSERT INTO my_table ( pk_column1, pk_column2, data_column2, data_column5 ) "
+            "VALUES ( 1, 10, 'Some text', Date('2021-10-07')), "
+            "( 2, 10, 'Some text', Date('2021-10-08'))",
+            write_sql=(
+                "UPSERT INTO `my_table` (pk_column1, pk_column2, data_column2, data_column5) "
+                "VALUES (1, 10, 'Some text', DATE('2021-10-07')), "
+                "(2, 10, 'Some text', DATE('2021-10-08'))"
+            ),
+        )
 
     # --- Module::Function() -------------------------------------------------
 
@@ -2606,12 +2782,112 @@ class TestYDBFromClickHouse(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestYDBFromPostgres(unittest.TestCase):
-    """Tests for source-dialect → YDB transpilation of FLATTEN analogues."""
+    """Tests for source-dialect → YDB transpilation from PostgreSQL syntax."""
 
     maxDiff = None
 
     def pg(self, sql: str) -> str:
         return parse_one(sql, dialect="postgres").sql(dialect="ydb")
+
+    def test_select_where_order_limit_offset(self):
+        self.assertEqual(
+            self.pg("SELECT id, name FROM users WHERE active IS TRUE ORDER BY id DESC LIMIT 10 OFFSET 5"),
+            "SELECT id, name FROM `users` WHERE active IS TRUE ORDER BY id DESC LIMIT 10 OFFSET 5",
+        )
+
+    def test_cte_becomes_ydb_named_expression(self):
+        self.assertEqual(
+            self.pg("WITH active AS (SELECT id FROM users WHERE active) SELECT * FROM active"),
+            "$active = (SELECT id FROM `users` WHERE active);\n\nSELECT * FROM $active AS active",
+        )
+
+    def test_join_group_having_window(self):
+        cases = [
+            (
+                "SELECT u.id, o.total FROM users u LEFT JOIN orders o "
+                "ON u.id = o.user_id WHERE o.total > 0",
+                "SELECT u.id AS id, o.total AS total FROM `users` AS u "
+                "LEFT JOIN `orders` AS o ON u.id = o.user_id WHERE o.total > 0",
+            ),
+            (
+                "SELECT user_id, COUNT(*), SUM(amount) FROM orders "
+                "GROUP BY user_id HAVING COUNT(*) > 1",
+                "SELECT user_id, COUNT(*), SUM(amount) FROM `orders` "
+                "GROUP BY user_id AS user_id HAVING COUNT(*) > 1",
+            ),
+            (
+                "SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY created_at) AS rn FROM items",
+                "SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY created_at) AS rn FROM `items`",
+            ),
+        ]
+        for sql, expected in cases:
+            with self.subTest(sql=sql):
+                self.assertEqual(self.pg(sql), expected)
+
+    def test_date_time_transforms(self):
+        cases = [
+            (
+                "SELECT DATE_TRUNC('month', created_at) FROM events",
+                "SELECT DateTime::MakeDate(DateTime::StartOfMonth(created_at)) FROM `events`",
+            ),
+            (
+                "SELECT EXTRACT(YEAR FROM created_at), EXTRACT(MONTH FROM created_at) FROM events",
+                "SELECT DateTime::GetYear(created_at), DateTime::GetMonth(created_at) FROM `events`",
+            ),
+            (
+                "SELECT created_at + INTERVAL '1 day', created_at - INTERVAL '2 hours' FROM events",
+                "SELECT created_at + DateTime::IntervalFromDays(1), "
+                "created_at - DateTime::IntervalFromHours(2) FROM `events`",
+            ),
+        ]
+        for sql, expected in cases:
+            with self.subTest(sql=sql):
+                self.assertEqual(self.pg(sql), expected)
+
+    def test_string_conditional_math_and_array_transforms(self):
+        cases = [
+            (
+                "SELECT CONCAT(first_name, ' ', last_name), UPPER(name), LOWER(name), LENGTH(name) FROM users",
+                "SELECT first_name || ' ' || last_name, Unicode::ToUpper(name), "
+                "Unicode::ToLower(name), Unicode::GetLength(name) FROM `users`",
+            ),
+            (
+                "SELECT COALESCE(NULLIF(status, ''), 'unknown'), ROUND(score, 2) FROM users",
+                "SELECT COALESCE(IF(status = '', NULL, status), 'unknown'), Math::Round(score, -2) FROM `users`",
+            ),
+            (
+                "SELECT ARRAY_AGG(id) FROM users",
+                "SELECT AGGREGATE_LIST(id) FROM `users`",
+            ),
+        ]
+        for sql, expected in cases:
+            with self.subTest(sql=sql):
+                self.assertEqual(self.pg(sql), expected)
+
+    def test_jsonb_contains_to_yson_contains(self):
+        self.assertEqual(
+            self.pg("SELECT payload @> '{\"kind\":\"click\"}'::jsonb FROM events"),
+            "SELECT Yson::Contains(payload, CAST('{\"kind\":\"click\"}' AS JSONB)) FROM `events`",
+        )
+
+    def test_dml_transpilation(self):
+        cases = [
+            (
+                "INSERT INTO dst (id, name) SELECT id, name FROM src WHERE active",
+                "INSERT INTO `dst` (id, name) SELECT id, name FROM `src` WHERE active",
+            ),
+            (
+                "UPDATE users SET name = 'x' WHERE id = 1 RETURNING id, name",
+                "UPDATE `users` SET name = 'x' WHERE id = 1 RETURNING id, name",
+            ),
+            (
+                "DELETE FROM users WHERE id = 1",
+                "DELETE FROM `users` WHERE id = 1",
+            ),
+        ]
+        for sql, expected in cases:
+            with self.subTest(sql=sql):
+                self.assertEqual(self.pg(sql), expected)
 
     def test_unnest_join_to_flatten_by(self):
         self.assertEqual(

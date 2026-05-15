@@ -26,6 +26,94 @@ result = sqlglot.transpile("$t = (SELECT id FROM users); SELECT * FROM $t AS t",
 
 ## What the plugin does
 
+### YDB syntax documentation conformance
+
+Source index: https://ydb.tech/docs/en/yql/reference/syntax/
+
+This is a working checklist for doc-conformance work against YDB syntax
+documentation. A checked item means `tests/unit/test_ydb.py` has focused tests
+derived from that page's snippets, syntax variants, or documented negative
+cases. An unchecked item is a backlog item.
+
+- [x] [Lexical structure](https://ydb.tech/docs/en/yql/reference/syntax/lexer) - `test_lexer_doc_*`
+- [x] [Expressions](https://ydb.tech/docs/en/yql/reference/syntax/expressions) - `test_expressions_doc_*`
+- [x] [SELECT](https://ydb.tech/docs/en/yql/reference/syntax/select/) - all tracked SELECT subpages below
+  - [x] [Overview](https://ydb.tech/docs/en/yql/reference/syntax/select/) - `test_select_overview_doc_*`
+  - [x] [FROM](https://ydb.tech/docs/en/yql/reference/syntax/select/from) - `test_from_doc_snippets`
+  - [x] [FROM AS_TABLE](https://ydb.tech/docs/en/yql/reference/syntax/select/from_as_table) - `test_from_as_table_doc_snippet`
+  - [x] [FROM SELECT](https://ydb.tech/docs/en/yql/reference/syntax/select/from_select) - `test_from_select_doc_snippets`
+  - [x] [FLATTEN](https://ydb.tech/docs/en/yql/reference/syntax/select/flatten) - `test_flatten_*_page_snippet_roundtrip_stable`
+  - [x] [GROUP BY](https://ydb.tech/docs/en/yql/reference/syntax/select/group_by) - `test_group_by_doc_*`
+  - [x] [JOIN](https://ydb.tech/docs/en/yql/reference/syntax/select/join) - `test_join_doc_*`
+  - [x] [WINDOW](https://ydb.tech/docs/en/yql/reference/syntax/select/window) - `test_window_functions`, `test_window_doc_partition_compact_hint`
+  - [x] [DISTINCT](https://ydb.tech/docs/en/yql/reference/syntax/select/distinct) - `test_distinct_doc_*`
+  - [x] [UNIQUE DISTINCT](https://ydb.tech/docs/en/yql/reference/syntax/select/unique_distinct_hints) - `test_unique_distinct_hints`
+  - [x] [UNION](https://ydb.tech/docs/en/yql/reference/syntax/select/union) - `test_union_doc_*`
+  - [x] [VIEW secondary_index](https://ydb.tech/docs/en/yql/reference/syntax/select/secondary_index) - `test_secondary_index_doc_*`
+  - [x] [VIEW vector_index](https://ydb.tech/docs/en/yql/reference/syntax/select/vector_index) - `test_vector_index_doc_*`
+  - [x] [WITH](https://ydb.tech/docs/en/yql/reference/syntax/select/with) - `test_with_doc_*`
+  - [x] [WITHOUT](https://ydb.tech/docs/en/yql/reference/syntax/select/without) - `test_without_doc_*`
+  - [x] [WHERE](https://ydb.tech/docs/en/yql/reference/syntax/select/where) - `test_where_doc_filter_snippet`
+  - [x] [ORDER BY](https://ydb.tech/docs/en/yql/reference/syntax/select/order_by) - `test_order_by_doc_*`
+  - [x] [ASSUME ORDER BY](https://ydb.tech/docs/en/yql/reference/syntax/select/assume_order_by) - `test_assume_order_by_doc_*`
+  - [x] [LIMIT OFFSET](https://ydb.tech/docs/en/yql/reference/syntax/select/limit_offset) - `test_limit_offset_doc_*`
+  - [x] [SAMPLE / TABLESAMPLE](https://ydb.tech/docs/en/yql/reference/syntax/select/sample) - `test_sample_doc_*`
+  - [x] [MATCH_RECOGNIZE](https://ydb.tech/docs/en/yql/reference/syntax/select/match_recognize) - `test_match_recognize_doc_*`
+- [ ] [VALUES](https://ydb.tech/docs/en/yql/reference/syntax/values)
+- [x] [CREATE TABLE](https://ydb.tech/docs/en/yql/reference/syntax/create_table/) - `test_create_table_doc_*`, `test_create_table_secondary_index_doc_*`, `test_create_table_family_doc_*`, TTL tests
+- [ ] [DROP TABLE](https://ydb.tech/docs/en/yql/reference/syntax/drop_table)
+- [ ] [INSERT](https://ydb.tech/docs/en/yql/reference/syntax/insert_into)
+- [ ] [ALTER TABLE](https://ydb.tech/docs/en/yql/reference/syntax/alter_table/)
+- [x] [UPDATE](https://ydb.tech/docs/en/yql/reference/syntax/update) - `test_update_doc_*`, `test_update_on_doc_snippet`
+- [ ] [DELETE](https://ydb.tech/docs/en/yql/reference/syntax/delete)
+- [ ] [REPLACE](https://ydb.tech/docs/en/yql/reference/syntax/replace_into)
+- [x] [UPSERT](https://ydb.tech/docs/en/yql/reference/syntax/upsert_into) - `test_upsert_into_doc_*`
+- [ ] [ACTION](https://ydb.tech/docs/en/yql/reference/syntax/action)
+- [ ] [INTO RESULT](https://ydb.tech/docs/en/yql/reference/syntax/into_result)
+- [ ] [PRAGMA](https://ydb.tech/docs/en/yql/reference/syntax/pragma)
+- [ ] [DECLARE](https://ydb.tech/docs/en/yql/reference/syntax/declare)
+- [ ] [CREATE TOPIC](https://ydb.tech/docs/en/yql/reference/syntax/create-topic)
+- [ ] [ALTER TOPIC](https://ydb.tech/docs/en/yql/reference/syntax/alter-topic)
+- [ ] [DROP TOPIC](https://ydb.tech/docs/en/yql/reference/syntax/drop-topic)
+- [ ] [CREATE ASYNC REPLICATION](https://ydb.tech/docs/en/yql/reference/syntax/create-async-replication)
+- [ ] [ALTER ASYNC REPLICATION](https://ydb.tech/docs/en/yql/reference/syntax/alter-async-replication)
+- [ ] [DROP ASYNC REPLICATION](https://ydb.tech/docs/en/yql/reference/syntax/drop-async-replication)
+- [ ] [CREATE TRANSFER](https://ydb.tech/docs/en/yql/reference/syntax/create-transfer)
+- [ ] [ALTER TRANSFER](https://ydb.tech/docs/en/yql/reference/syntax/alter-transfer)
+- [ ] [DROP TRANSFER](https://ydb.tech/docs/en/yql/reference/syntax/drop-transfer)
+- [ ] [COMMIT](https://ydb.tech/docs/en/yql/reference/syntax/commit)
+- [ ] [CREATE VIEW](https://ydb.tech/docs/en/yql/reference/syntax/create-view)
+- [ ] [ALTER VIEW](https://ydb.tech/docs/en/yql/reference/syntax/alter-view)
+- [ ] [DROP VIEW](https://ydb.tech/docs/en/yql/reference/syntax/drop-view)
+- [ ] [CREATE EXTERNAL DATA SOURCE](https://ydb.tech/docs/en/yql/reference/syntax/create-external-data-source)
+- [ ] [CREATE EXTERNAL TABLE](https://ydb.tech/docs/en/yql/reference/syntax/create-external-table)
+- [ ] [DROP EXTERNAL DATA SOURCE](https://ydb.tech/docs/en/yql/reference/syntax/drop-external-data-source)
+- [ ] [DROP EXTERNAL TABLE](https://ydb.tech/docs/en/yql/reference/syntax/drop-external-table)
+- [ ] [CREATE OBJECT (TYPE SECRET)](https://ydb.tech/docs/en/yql/reference/syntax/create-object-type-secret)
+- [ ] [CREATE OBJECT (TYPE SECRET_ACCESS)](https://ydb.tech/docs/en/yql/reference/syntax/create-object-type-secret-access)
+- [ ] [DROP OBJECT (TYPE SECRET)](https://ydb.tech/docs/en/yql/reference/syntax/drop-object-type-secret)
+- [ ] [DROP OBJECT (TYPE SECRET_ACCESS)](https://ydb.tech/docs/en/yql/reference/syntax/drop-object-type-secret-access)
+- [ ] [UPSERT OBJECT (TYPE SECRET)](https://ydb.tech/docs/en/yql/reference/syntax/upsert-object-type-secret)
+- [ ] [CREATE RESOURCE POOL](https://ydb.tech/docs/en/yql/reference/syntax/create-resource-pool)
+- [ ] [ALTER RESOURCE POOL](https://ydb.tech/docs/en/yql/reference/syntax/alter-resource-pool)
+- [ ] [DROP RESOURCE POOL](https://ydb.tech/docs/en/yql/reference/syntax/drop-resource-pool)
+- [ ] [CREATE RESOURCE POOL CLASSIFIER](https://ydb.tech/docs/en/yql/reference/syntax/create-resource-pool-classifier)
+- [ ] [ALTER RESOURCE POOL CLASSIFIER](https://ydb.tech/docs/en/yql/reference/syntax/alter-resource-pool-classifier)
+- [ ] [DROP RESOURCE POOL CLASSIFIER](https://ydb.tech/docs/en/yql/reference/syntax/drop-resource-pool-classifier)
+- [ ] [CREATE USER](https://ydb.tech/docs/en/yql/reference/syntax/create-user)
+- [ ] [ALTER USER](https://ydb.tech/docs/en/yql/reference/syntax/alter-user)
+- [ ] [DROP USER](https://ydb.tech/docs/en/yql/reference/syntax/drop-user)
+- [ ] [CREATE GROUP](https://ydb.tech/docs/en/yql/reference/syntax/create-group)
+- [ ] [ALTER GROUP](https://ydb.tech/docs/en/yql/reference/syntax/alter-group)
+- [ ] [DROP GROUP](https://ydb.tech/docs/en/yql/reference/syntax/drop-group)
+- [ ] [GRANT](https://ydb.tech/docs/en/yql/reference/syntax/grant)
+- [ ] [REVOKE](https://ydb.tech/docs/en/yql/reference/syntax/revoke)
+- [ ] [Unsupported syntax](https://ydb.tech/docs/en/yql/reference/syntax/unsupported)
+
+Unchecked pages may already have incidental parser support. They remain
+unchecked until their specific documentation page has been used as the normative
+source and focused tests have been added or corrected.
+
 ### Any SQL → YDB
 
 #### Table names
