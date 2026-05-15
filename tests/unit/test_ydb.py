@@ -159,6 +159,42 @@ class TestYDBIdentity(Validator):
             write_sql="SELECT * FROM `a_table` AS a JOIN `b_table` AS b USING (key)",
         )
 
+    def test_insert_into_doc_snippets(self):
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(
+                "INSERT INTO my_table (Key1, Key2, Value1, Value2)\n"
+                "VALUES (345987,'ydb', 'Pied piper', 1414);\n"
+                "COMMIT;",
+                dialect="ydb",
+            )
+            if expression is not None
+        )
+        self.assertEqual(
+            "INSERT INTO `my_table` (Key1, Key2, Value1, Value2) "
+            "VALUES (345987, 'ydb', 'Pied piper', 1414);\n"
+            "COMMIT",
+            generated,
+        )
+        self.validate_identity(
+            'INSERT INTO my_table (key, value) VALUES ("foo", 1), ("bar", 2)',
+            write_sql="INSERT INTO `my_table` (key, value) VALUES ('foo', 1), ('bar', 2)",
+        )
+        self.validate_identity(
+            'INSERT INTO my_table SELECT Key AS Key1, "Empty" AS Key2, Value AS Value1 FROM my_table1',
+            write_sql="INSERT INTO `my_table` SELECT Key AS Key1, 'Empty' AS Key2, "
+            "Value AS Value1 FROM `my_table1`",
+        )
+
+    @unittest.skip("External data source INSERT options are not supported yet")
+    def test_insert_into_external_file_doc_snippet(self):
+        self.validate_identity(
+            'INSERT INTO `connection`.`test/` WITH (FORMAT = "csv_with_names") '
+            'SELECT "value" AS value, "name" AS name',
+            write_sql="INSERT INTO `connection`.`test/` WITH (FORMAT='csv_with_names') "
+            "SELECT 'value' AS value, 'name' AS name",
+        )
+
     def test_unique_distinct_hints(self):
         cases = [
             "SELECT /*+ unique */ id FROM `table`",
@@ -2872,6 +2908,14 @@ class TestYDBFromPostgres(unittest.TestCase):
 
     def test_dml_transpilation(self):
         cases = [
+            (
+                "INSERT INTO dst (id, name) VALUES (1, 'Alice')",
+                "INSERT INTO `dst` (id, name) VALUES (1, 'Alice')",
+            ),
+            (
+                "INSERT INTO dst (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+                "INSERT INTO `dst` (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+            ),
             (
                 "INSERT INTO dst (id, name) SELECT id, name FROM src WHERE active",
                 "INSERT INTO `dst` (id, name) SELECT id, name FROM `src` WHERE active",

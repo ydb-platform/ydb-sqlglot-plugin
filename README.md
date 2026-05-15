@@ -62,7 +62,7 @@ cases. An unchecked item is a backlog item.
 - [ ] [VALUES](https://ydb.tech/docs/en/yql/reference/syntax/values)
 - [x] [CREATE TABLE](https://ydb.tech/docs/en/yql/reference/syntax/create_table/) - `test_create_table_doc_*`, `test_create_table_secondary_index_doc_*`, `test_create_table_family_doc_*`, TTL tests
 - [ ] [DROP TABLE](https://ydb.tech/docs/en/yql/reference/syntax/drop_table)
-- [ ] [INSERT](https://ydb.tech/docs/en/yql/reference/syntax/insert_into)
+- [x] [INSERT](https://ydb.tech/docs/en/yql/reference/syntax/insert_into) - `test_insert_into_doc_snippets`, `test_insert_into_external_file_doc_snippet` (skipped: external sources), pg→ydb DML coverage
 - [ ] [ALTER TABLE](https://ydb.tech/docs/en/yql/reference/syntax/alter_table/)
 - [x] [UPDATE](https://ydb.tech/docs/en/yql/reference/syntax/update) - `test_update_doc_*`, `test_update_on_doc_snippet`
 - [ ] [DELETE](https://ydb.tech/docs/en/yql/reference/syntax/delete)
