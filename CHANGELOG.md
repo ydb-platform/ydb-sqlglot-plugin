@@ -1,3 +1,4 @@
+## 0.2.5 ##
 * Add official YDB syntax documentation conformance tests for FLATTEN, GROUP BY, JOIN, DISTINCT, WITH, WITHOUT, ORDER BY, SAMPLE/TABLESAMPLE, MATCH_RECOGNIZE, lexical structure, expressions, and CREATE TABLE
 * Extend YDB parser/generator support for documented SELECT syntax including FLATTEN variants, GROUP BY aliases/windows/extensions, JOIN variants, DISTINCT rewrites, WITH table options, WITHOUT projections, ORDER BY limits, TABLESAMPLE/SAMPLE, MATCH_RECOGNIZE, and secondary/vector index views
 * Add lexer and expression coverage for comments, identifiers, string and numeric literals, operators, predicates, casts, named expressions, table expressions, lambda functions, and container access
