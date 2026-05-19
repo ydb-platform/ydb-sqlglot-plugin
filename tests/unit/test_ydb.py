@@ -1,6 +1,6 @@
 import unittest
 
-from sqlglot import ErrorLevel, ParseError, UnsupportedError, parse, parse_one
+from sqlglot import ErrorLevel, ParseError, UnsupportedError, exp, parse, parse_one
 from sqlglot.parser import logger as parser_logger
 
 from ydb_sqlglot.ydb import eliminate_join_marks, make_db_name_lower, table_names_to_lower_case
@@ -546,6 +546,33 @@ class TestYDBTransforms(Validator):
             ).sql(dialect="ydb"),
             "SELECT * FROM `rtlog-index/request/2026-01-25T08:00:00`",
         )
+
+    def test_deep_table_path_roundtrip(self):
+        expression = self.validate_identity("SELECT * FROM `a/b/c/d/e/f/g/h/i/j/table`")
+        table = expression.find(exp.Table)
+        self.assertEqual(table.catalog, "")
+        self.assertEqual(table.db, "a/b/c/d/e/f/g/h/i/j")
+        self.assertEqual(table.name, "table")
+
+        expression = self.validate_identity("SELECT * FROM `/Root/db/a/b/c/d/e/f/g/h/i/j/table`")
+        table = expression.find(exp.Table)
+        self.assertEqual(table.catalog, "")
+        self.assertEqual(table.db, "/Root/db/a/b/c/d/e/f/g/h/i/j")
+        self.assertEqual(table.name, "table")
+
+    def test_federated_ydb_table_path_roundtrip(self):
+        expression = self.validate_identity("SELECT * FROM ydb_datasource.`dir1/dir2/table3`")
+        table = expression.find(exp.Table)
+        self.assertEqual(table.catalog, "ydb_datasource")
+        self.assertEqual(table.db, "dir1/dir2")
+        self.assertEqual(table.name, "table3")
+
+    def test_federated_ydb_top_level_table_roundtrip(self):
+        expression = self.validate_identity("SELECT * FROM ydb_datasource.table3")
+        table = expression.find(exp.Table)
+        self.assertEqual(table.catalog, "ydb_datasource")
+        self.assertEqual(table.db, "")
+        self.assertEqual(table.name, "table3")
 
     def test_table_view_index(self):
         self.assertEqual(
