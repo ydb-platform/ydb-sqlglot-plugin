@@ -1,3 +1,4 @@
+## 0.2.6 ##
 * Normalize YDB table paths for lineage
 
 ## 0.2.5 ##
