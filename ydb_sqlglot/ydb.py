@@ -1532,31 +1532,6 @@ class YDB(Dialect):
                     return None
             return super()._parse_table_alias(alias_tokens=alias_tokens)
 
-        def _normalize_ydb_table_path(self, table: exp.Expression) -> exp.Expression:
-            if not isinstance(table, exp.Table):
-                return table
-
-            identifier = table.this
-            if not isinstance(identifier, exp.Identifier) or table.catalog:
-                return table
-
-            path = identifier.this
-            if "/" not in path:
-                if table.db:
-                    table.set("catalog", table.args.get("db"))
-                    table.set("db", None)
-                return table
-
-            schema, name = path.rsplit("/", 1)
-            if not schema or not name:
-                return table
-
-            if table.db:
-                table.set("catalog", table.args.get("db"))
-            table.set("db", exp.to_identifier(schema, quoted=True))
-            table.set("this", exp.to_identifier(name, quoted=True))
-            return table
-
         def _parse_table_hints(self) -> t.Optional[t.List[exp.Expression]]:
             if not (self._curr and self._curr.token_type == TokenType.WITH):
                 return super()._parse_table_hints()
@@ -1870,9 +1845,9 @@ class YDB(Dialect):
                     parts.append(self._curr.text)
                     self._advance()
                 self._match(TokenType.R_BRACKET)
-                table = self.expression(exp.Table(this=exp.to_identifier("".join(parts), quoted=True)))
+                table = self.expression(exp.Table(this=exp.to_identifier("".join(parts))))
                 table.set("alias", self._parse_table_alias())
-                return self._normalize_ydb_table_path(table)
+                return table
 
             table = super()._parse_table(*args, **kwargs)
             if (
@@ -1886,8 +1861,6 @@ class YDB(Dialect):
                 param = self._parse_parameter()
                 table = self.expression(exp.Table(this=param))
                 table.set("alias", self._parse_table_alias())
-            if table:
-                table = self._normalize_ydb_table_path(table)
             if table and self._match(TokenType.VIEW):
                 table.set("ydb_index_view", self._parse_id_var(any_token=True))
                 explicit_alias = bool(self._curr and self._curr.token_type == TokenType.ALIAS)
@@ -2439,12 +2412,8 @@ class YDB(Dialect):
                 if expression.alias:
                     sql += f" AS {expression.alias}"
                 return _with_table_joins(sql)
-            path = f"{expression.db}/{expression.name}" if expression.db else expression.name
-            if expression.catalog:
-                table_identifier = f"`{path}`" if expression.db else self.sql(expression, "this")
-                sql = f"{expression.catalog}.{table_identifier}"
-            else:
-                sql = f"`{path}`"
+            prefix = f"{expression.db}/" if expression.db else ""
+            sql = f"`{prefix}{expression.name}`"
 
             ydb_index_view = self.sql(expression, "ydb_index_view")
             if ydb_index_view:
