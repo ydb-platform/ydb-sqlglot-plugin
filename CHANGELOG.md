@@ -1,3 +1,4 @@
+## 0.2.7 ##
 * Revert "Normalize YDB table paths for lineage"
 
 ## 0.2.6 ##
