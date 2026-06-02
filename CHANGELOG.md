@@ -1,3 +1,4 @@
+## 0.2.8 ##
 * Add yql sqlglot dialect entry point
 
 ## 0.2.7 ##
