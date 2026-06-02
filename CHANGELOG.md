@@ -1,3 +1,5 @@
+* Add yql sqlglot dialect entry point
+
 ## 0.2.7 ##
 * Revert "Normalize YDB table paths for lineage"
 
