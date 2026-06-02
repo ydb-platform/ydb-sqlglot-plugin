@@ -1,3 +1,4 @@
+import importlib.metadata
 import unittest
 
 from sqlglot import ErrorLevel, ParseError, UnsupportedError, parse, parse_one
@@ -67,10 +68,43 @@ def ydb(sql, read=None):
     return parse_one(sql, dialect=read).sql(dialect="ydb")
 
 
+def sqlglot_dialect_entry_points():
+    entry_points = importlib.metadata.entry_points()
+
+    if hasattr(entry_points, "select"):
+        return entry_points.select(group="sqlglot.dialects")
+
+    return entry_points.get("sqlglot.dialects", [])
+
+
 # ---------------------------------------------------------------------------
 # YDB identity: we parse YDB SQL and expect to get the same string back.
 # This confirms the dialect supports these constructs without mangling them.
 # ---------------------------------------------------------------------------
+
+class TestYQLDialectDiscovery(unittest.TestCase):
+    """Smoke tests for the YQL alias published through sqlglot entry points."""
+
+    def test_yql_entry_point_is_published(self):
+        entry_points = {
+            (entry_point.name, entry_point.value)
+            for entry_point in sqlglot_dialect_entry_points()
+            if entry_point.value == "ydb_sqlglot.ydb:YDB"
+        }
+
+        self.assertIn(("ydb", "ydb_sqlglot.ydb:YDB"), entry_points)
+        self.assertIn(("yql", "ydb_sqlglot.ydb:YDB"), entry_points)
+
+    def test_yql_alias_uses_ydb_dialect(self):
+        self.assertEqual(
+            parse_one("SELECT * FROM my_table", dialect="yql").sql(dialect="yql"),
+            "SELECT * FROM `my_table`",
+        )
+        self.assertEqual(
+            parse_one("$t = (SELECT 1 AS value); SELECT * FROM $t AS t", dialect="yql").sql(dialect="postgres"),
+            "WITH t AS (SELECT 1 AS value) SELECT * FROM t AS t",
+        )
+
 
 class TestYDBIdentity(Validator):
     """Round-trip tests: YDB → parse → generate → same YDB."""
