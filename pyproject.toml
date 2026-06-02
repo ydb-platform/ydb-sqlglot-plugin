@@ -40,6 +40,7 @@ Repository = "https://github.com/ydb-platform/ydb-sqlglot-plugin"
 
 [project.entry-points."sqlglot.dialects"]
 ydb = "ydb_sqlglot.ydb:YDB"
+yql = "ydb_sqlglot.ydb:YDB"
 
 [tool.setuptools.packages.find]
 where = ["."]
