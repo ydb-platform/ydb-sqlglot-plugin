@@ -2918,7 +2918,7 @@ class TestYDBFromPostgres(unittest.TestCase):
         cases = [
             (
                 "SELECT CONCAT(first_name, ' ', last_name), UPPER(name), LOWER(name), LENGTH(name) FROM users",
-                "SELECT first_name || ' ' || last_name, Unicode::ToUpper(name), "
+                "SELECT COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''), Unicode::ToUpper(name), "
                 "Unicode::ToLower(name), Unicode::GetLength(name) FROM `users`",
             ),
             (

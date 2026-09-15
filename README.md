@@ -8,6 +8,12 @@ YDB dialect plugin for [sqlglot](https://github.com/tobymao/sqlglot) — bidirec
 pip install ydb-sqlglot-plugin
 ```
 
+The plugin supports the pure-Python SQLGlot package. It is not compatible with
+`sqlglot[c]`: mypyc-compiled SQLGlot classes cannot be subclassed by an external
+Python dialect. Install SQLGlot without the `c` extra, or enable the host
+application's pure-Python fallback before Python starts. For DataHub, set
+`DATAHUB_SQLGLOT_DISABLE_C=1` on the ingestion process.
+
 ## Usage
 
 After installing the package, the `ydb` dialect is available in sqlglot automatically — no extra imports needed:
