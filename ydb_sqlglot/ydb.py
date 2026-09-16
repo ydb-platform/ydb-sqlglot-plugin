@@ -1596,6 +1596,17 @@ class YDB(Dialect):
                 return [exp.Var(this=self.sql[start:end + 1])]
             return None
 
+        def _parse_into(self) -> t.Optional[exp.Into]:
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.INTO
+                and self._next
+                and self._next.text.upper() == "RESULT"
+            ):
+                return None
+
+            return super()._parse_into()
+
         def _parse_query_modifiers(self, this):
             if (
                 self._curr
@@ -1607,7 +1618,19 @@ class YDB(Dialect):
                 _, order = self.QUERY_MODIFIER_PARSERS[TokenType.ORDER_BY](self)
                 if order and this:
                     this.set("order", self.expression(AssumeOrderBy(this=order)))
-            return super()._parse_query_modifiers(this)
+            this = super()._parse_query_modifiers(this)
+
+            if self._match(TokenType.INTO):
+                if not self._match_text_seq("RESULT"):
+                    self.raise_error("Expected RESULT after INTO")
+
+                label = self._parse_id_var()
+                if not label:
+                    self.raise_error("Expected label after INTO RESULT")
+                if this:
+                    this.set("into_result", label)
+
+            return this
 
         def _parse_partition_by(self) -> t.List[exp.Expression]:
             if self._match(TokenType.PARTITION_BY):
@@ -4282,7 +4305,9 @@ class YDB(Dialect):
                         self.expression_to_alias[expr_sql] = select_expr.alias_or_name
             # in .sql() calls ww generated ydb_variables, drop it not to produce unused vars
             self.ydb_variables = {}
-            return super().select_sql(expression)
+            sql = super().select_sql(expression)
+            into_result = self.sql(expression, "into_result")
+            return f"{sql} INTO RESULT {into_result}" if into_result else sql
 
         def hint_sql(self, expression: exp.Hint) -> str:
             hints = [str(hint).strip() for hint in expression.expressions if str(hint).strip()]

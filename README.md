@@ -75,7 +75,7 @@ cases. An unchecked item is a backlog item.
 - [ ] [REPLACE](https://ydb.tech/docs/en/yql/reference/syntax/replace_into)
 - [x] [UPSERT](https://ydb.tech/docs/en/yql/reference/syntax/upsert_into) - `test_upsert_into_doc_*`
 - [ ] [ACTION](https://ydb.tech/docs/en/yql/reference/syntax/action)
-- [ ] [INTO RESULT](https://ydb.tech/docs/en/yql/reference/syntax/into_result)
+- [x] [INTO RESULT](https://ydb.tech/docs/en/yql/reference/syntax/into_result) - `test_into_result_doc_*`
 - [ ] [PRAGMA](https://ydb.tech/docs/en/yql/reference/syntax/pragma)
 - [ ] [DECLARE](https://ydb.tech/docs/en/yql/reference/syntax/declare)
 - [ ] [CREATE TOPIC](https://ydb.tech/docs/en/yql/reference/syntax/create-topic)

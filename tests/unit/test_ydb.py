@@ -2482,6 +2482,18 @@ class TestYDBAdvancedSyntax(Validator):
         )
         self.assertEqual(generated, regenerated)
 
+    def test_into_result_doc_simple_label(self):
+        self.validate_identity("SELECT 1 INTO RESULT foo")
+
+    def test_into_result_doc_quoted_label(self):
+        self.validate_identity(
+            "SELECT * FROM my_table WHERE value % 2 == 0 INTO RESULT `Result name`",
+            write_sql=(
+                "SELECT * FROM `my_table` WHERE value % 2 = 0 "
+                "INTO RESULT `Result name`"
+            ),
+        )
+
     def test_variable_call_expression(self):
         sql = (
             "$grep = Re2::Grep($needle);\n"
