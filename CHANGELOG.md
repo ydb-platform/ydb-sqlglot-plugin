@@ -1,3 +1,4 @@
+* Preserve CREATE VIEW IF NOT EXISTS and support documented security_invoker options
 * Preserve source-dialect NULL semantics when transpiling `CONCAT` to YDB across supported SQLGlot versions
 * Support the renamed set-operation scope type on upcoming SQLGlot releases
 

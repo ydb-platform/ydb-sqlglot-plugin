@@ -1077,6 +1077,21 @@ class YDB(Dialect):
             if self._curr and self._curr.text.upper() == "TTL":
                 return self._parse_ydb_ttl_property()
 
+            if self._curr and self._curr.text.upper() == "SECURITY_INVOKER":
+                self._advance()
+                value = None
+                if self._match(TokenType.EQ):
+                    value = self._parse_bitwise() or self._parse_var(any_token=True)
+                elif self._curr and self._curr.token_type in (
+                    TokenType.COMMA,
+                    TokenType.R_PAREN,
+                ):
+                    value = exp.Boolean(this=True)
+
+                return self.expression(
+                    exp.Property(this=exp.var("security_invoker"), value=value)
+                )
+
             return super()._parse_property()
 
         def _parse_ydb_ttl_property(self) -> YdbTtlProperty:
@@ -2365,7 +2380,27 @@ class YDB(Dialect):
                 ident_sql = self.sql(ident)
                 sql = self.sql(expression.expression)
 
-                return f"CREATE VIEW {ident_sql} WITH (security_invoker = TRUE) AS {sql}"
+                properties = expression.args.get("properties")
+                if properties:
+                    for prop in properties.expressions:
+                        if not isinstance(prop, exp.Property):
+                            raise UnsupportedError(
+                                "YDB CREATE VIEW supports only the security_invoker option"
+                            )
+
+                        name = self.sql(prop, "this").lower()
+                        value = prop.args.get("value")
+                        if name != "security_invoker":
+                            raise UnsupportedError(
+                                "YDB CREATE VIEW supports only the security_invoker option"
+                            )
+                        if not isinstance(value, exp.Boolean) or not value.this:
+                            raise UnsupportedError(
+                                "YDB CREATE VIEW requires security_invoker to be TRUE"
+                            )
+
+                exists = " IF NOT EXISTS" if expression.args.get("exists") else ""
+                return f"CREATE VIEW{exists} {ident_sql} WITH (security_invoker = TRUE) AS {sql}"
             elif expression.kind == "FUNCTION":
                 # CREATE -> FUNCTION -> TABLE
                 func_name = self.sql(expression.this.this.alias_or_name)

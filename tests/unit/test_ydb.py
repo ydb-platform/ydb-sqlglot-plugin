@@ -824,6 +824,119 @@ class TestYDBTransforms(Validator):
             "ALTER TABLE `table` ADD COLUMN new_column Utf8",
         )
 
+    def test_create_view_doc_syntax_variants(self):
+        cases = [
+            (
+                "CREATE VIEW IF NOT EXISTS recent_series "
+                "WITH (security_invoker = TRUE) AS SELECT * FROM `/domain/database/path/to/series`",
+                "CREATE VIEW IF NOT EXISTS recent_series "
+                "WITH (security_invoker = TRUE) AS SELECT * FROM `/domain/database/path/to/series`",
+            ),
+            (
+                "CREATE VIEW recent_series WITH (security_invoker) AS SELECT 1",
+                "CREATE VIEW recent_series WITH (security_invoker = TRUE) AS SELECT 1",
+            ),
+            (
+                "CREATE VIEW recent_series AS SELECT 1",
+                "CREATE VIEW recent_series WITH (security_invoker = TRUE) AS SELECT 1",
+            ),
+        ]
+
+        for sql, expected in cases:
+            with self.subTest(sql=sql):
+                self.assertEqual(self.parse_one(sql).sql(dialect="ydb"), expected)
+
+    def test_create_view_doc_renamed_column_snippet(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE VIEW view_with_a_renamed_column WITH (security_invoker = TRUE) AS
+                SELECT
+                    original_column_name AS custom_column_name
+                FROM `/domain/database/path/to/underlying_table`;
+                """
+            ).sql(dialect="ydb"),
+            "CREATE VIEW view_with_a_renamed_column WITH (security_invoker = TRUE) AS "
+            "SELECT original_column_name AS custom_column_name "
+            "FROM `/domain/database/path/to/underlying_table`",
+        )
+
+    def test_create_view_doc_asterisk_snippet(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE VIEW view_with_an_asterisk WITH (security_invoker = TRUE) AS
+                SELECT
+                    *
+                FROM `/domain/database/path/to/underlying_table`;
+                """
+            ).sql(dialect="ydb"),
+            "CREATE VIEW view_with_an_asterisk WITH (security_invoker = TRUE) AS "
+            "SELECT * FROM `/domain/database/path/to/underlying_table`",
+        )
+        self.assertEqual(
+            self.parse_one("SELECT * FROM view_with_an_asterisk").sql(dialect="ydb"),
+            "SELECT * FROM `view_with_an_asterisk`",
+        )
+
+    def test_create_view_doc_recent_series_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE VIEW recent_series WITH (security_invoker = TRUE) AS
+                SELECT
+                    *
+                FROM `/domain/database/path/to/series`
+                WHERE
+                    release_date > Date("2020-01-01");
+                """
+            ).sql(dialect="ydb"),
+            "CREATE VIEW recent_series WITH (security_invoker = TRUE) AS "
+            "SELECT * FROM `/domain/database/path/to/series` "
+            "WHERE release_date > DATE('2020-01-01')",
+        )
+
+    def test_create_view_doc_join_example(self):
+        self.assertEqual(
+            self.parse_one(
+                """
+                CREATE VIEW recent_series_first_episodes_titles WITH (security_invoker = TRUE) AS
+                SELECT
+                    episodes.title AS first_episode
+                FROM `/domain/database/path/to/recent_series`
+                    AS recent_series
+                JOIN `/domain/database/path/to/episodes`
+                    AS episodes
+                USING(series_id)
+                WHERE episodes.season_id = 1 AND episodes.episode_id = 1;
+                """
+            ).sql(dialect="ydb"),
+            "CREATE VIEW recent_series_first_episodes_titles WITH (security_invoker = TRUE) AS "
+            "SELECT episodes.title AS first_episode "
+            "FROM `/domain/database/path/to/recent_series` AS recent_series "
+            "JOIN `/domain/database/path/to/episodes` AS episodes USING (series_id) "
+            "WHERE episodes.season_id = 1 AND episodes.episode_id = 1",
+        )
+
+    def test_create_view_doc_requires_true_boolean_security_invoker(self):
+        for value in ("FALSE", "1"):
+            with self.subTest(value=value), self.assertRaises(UnsupportedError):
+                self.parse_one(
+                    f"CREATE VIEW recent_series WITH (security_invoker = {value}) AS SELECT 1"
+                ).sql(dialect="ydb")
+
+    def test_create_view_doc_rejects_unknown_option(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one(
+                "CREATE VIEW recent_series WITH (unknown_option = TRUE) AS SELECT 1"
+            ).sql(dialect="ydb")
+
+    def test_create_view_from_postgres(self):
+        self.assertEqual(
+            ydb("CREATE VIEW recent_series AS SELECT * FROM series", read="postgres"),
+            "CREATE VIEW recent_series WITH (security_invoker = TRUE) AS SELECT * FROM `series`",
+        )
+
     def test_create_table_simple_types(self):
         sql = """
             CREATE TABLE table (
