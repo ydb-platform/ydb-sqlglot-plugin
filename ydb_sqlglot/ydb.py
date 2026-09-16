@@ -2,9 +2,10 @@ import inspect as _inspect
 import re
 import typing as t
 from collections import defaultdict
+from functools import reduce
 
 from sqlglot import Generator, TokenType, exp, generator, parser, tokens, transforms
-from sqlglot.dialects.dialect import Dialect, NormalizationStrategy, concat_to_dpipe_sql, unit_to_var
+from sqlglot.dialects.dialect import Dialect, NormalizationStrategy, unit_to_var
 from sqlglot.errors import UnsupportedError
 from sqlglot.expressions import Expression
 from sqlglot.helper import ensure_list, flatten, name_sequence, seq_get
@@ -13,6 +14,19 @@ from sqlglot.optimizer.simplify import simplify
 from sqlglot.transforms import eliminate_join_marks, move_ctes_to_top_level
 
 JOIN_ATTRS = ("on", "side", "kind", "using", "method")
+SET_OPERATION_SCOPE_TYPE = getattr(ScopeType, "SET_OPERATION", None)
+if SET_OPERATION_SCOPE_TYPE is None:
+    SET_OPERATION_SCOPE_TYPE = ScopeType.UNION
+
+
+def concat_to_dpipe_sql(self: Generator, expression: exp.Concat) -> str:
+    """Render CONCAT as || while preserving the source dialect's NULL semantics."""
+    return self.sql(
+        reduce(
+            lambda left, right: exp.DPipe(this=left, expression=right),
+            self.convert_concat_args(expression),
+        )
+    )
 
 
 def rename_func_not_normalize(name: str) -> t.Callable[[Generator, exp.Expression], str]:
@@ -3239,7 +3253,7 @@ class YDB(Dialect):
                 if scope.external_columns and scope.scope_type not in (
                     ScopeType.CTE,
                     ScopeType.DERIVED_TABLE,
-                    ScopeType.UNION,
+                    SET_OPERATION_SCOPE_TYPE,
                 ):
                     self.decorrelate(select, parent, scope.external_columns, next_alias_name)
                 if scope.scope_type == ScopeType.SUBQUERY:

@@ -141,6 +141,42 @@ NULL_ORDERING_SUPPORTED = True     # generator can emit NULLS FIRST/LAST
    ```
 3. Add a test in `TestYDBTransforms` or `TestYDBFromClickHouse`.
 
+## CHANGELOG
+
+`CHANGELOG.md` has no "unreleased" section. Pending release notes are the bullets
+above the first `## ` line; that first heading is the latest released version.
+
+- Add a `*` bullet at the very top only for changes meaningful to users: new or
+  changed behavior, bug fixes, and performance or compatibility improvements.
+- Do not add entries for internal-only work such as tests, coverage, CI,
+  refactors, or documentation.
+- Never add a heading above the pending bullets: no `## Unreleased`, `## Next`,
+  date, version, or `### Added` / `### Fixed` subsection.
+- Do not reorder or reword existing entries or restyle the file.
+
+This is required by the release automation. `python-publish.yml` reads release
+notes as everything above the first `## ` line, and `increment_version.py`
+inserts the new version heading there. A leading heading makes the release notes
+empty and prevents the version heading from being inserted.
+
+Correct:
+
+```md
+* Preserve PostgreSQL CONCAT null semantics when transpiling to YDB
+
+## 0.2.8 ##
+* Add yql sqlglot dialect entry point
+```
+
+Wrong:
+
+```md
+## Unreleased ##
+* Preserve PostgreSQL CONCAT null semantics when transpiling to YDB
+
+## 0.2.8 ##
+```
+
 ## Test structure
 
 | Class | What it covers |
