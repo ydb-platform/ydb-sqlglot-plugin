@@ -471,6 +471,11 @@ class YdbUpdateOn(exp.Expression):
     arg_types = {"this": True, "expression": True}
 
 
+class YdbDeleteOn(exp.Expression):
+    """YDB DELETE FROM ... ON statement using rows produced by a query."""
+    arg_types = {"this": True, "expression": True}
+
+
 class YdbBitwiseRotLeft(exp.Expression):
     """YDB circular left shift operator: a |< b."""
     arg_types = {"this": True, "expression": True}
@@ -701,6 +706,7 @@ class YDB(Dialect):
             "UTF8": TokenType.TEXT,       # YDB Utf8 = unicode text = SQL TEXT
             "STRING": TokenType.BLOB,     # YDB String = bytes = SQL BLOB
             "LIST": TokenType.VAR,
+            "REPLACE": TokenType.INSERT,
             "UPSERT": TokenType.INSERT,
         }
 
@@ -933,11 +939,26 @@ class YDB(Dialect):
             self._retreat(index)
             return super()._parse_update()
 
+        def _parse_delete(self) -> exp.Expression:
+            index = self._index
+            if self._match(TokenType.FROM):
+                table = self._parse_table(joins=True)
+                if table and self._match(TokenType.ON):
+                    query = self._parse_select() or self._parse_expression()
+                    if not query:
+                        self.raise_error("Expected query after DELETE FROM ... ON")
+                    return self.expression(YdbDeleteOn(this=table, expression=query))
+
+            self._retreat(index)
+            return super()._parse_delete()
+
         def _parse_insert(self) -> t.Union[exp.Insert, exp.MultitableInserts]:
-            is_upsert = bool(self._prev and self._prev.text.upper() == "UPSERT")
+            statement = self._prev.text.upper() if self._prev else "INSERT"
             insert = super()._parse_insert()
-            if is_upsert:
+            if statement == "UPSERT":
                 insert.meta["ydb_upsert"] = True
+            elif statement == "REPLACE":
+                insert.meta["ydb_replace"] = True
             return insert
 
         def _parse_lambda_arg(self) -> t.Optional[exp.Expression]:
@@ -2449,6 +2470,26 @@ class YDB(Dialect):
 
             return _with_table_joins(sql)
 
+        def values_sql(self, expression: exp.Values, values_as_table: bool = True) -> str:
+            """Preserve YDB's ``VALUES (...) AS table(column, ...)`` syntax."""
+            alias = expression.args.get("alias")
+            columns = alias and alias.args.get("columns")
+
+            if not columns:
+                return super().values_sql(expression, values_as_table=values_as_table)
+
+            # Table alias column lists are generally unsupported by YDB, but the
+            # VALUES table constructor explicitly allows them. Let the base
+            # generator render a plain alias, then add the VALUES-specific list.
+            values = expression.copy()
+            values_alias = alias.copy()
+            values_alias.set("columns", [])
+            values.set("alias", values_alias)
+
+            sql = super().values_sql(values, values_as_table=values_as_table)
+            column_sql = self.expressions(alias, key="columns", flat=True)
+            return f"{sql}({column_sql})"
+
         def is_sql(self, expression: exp.Is) -> str:
             """
             Generate SQL for IS expressions with special handling for IS NOT NULL.
@@ -2552,10 +2593,19 @@ class YDB(Dialect):
         def ydbupdateon_sql(self, expression: YdbUpdateOn) -> str:
             return f"UPDATE {self.sql(expression, 'this')} ON {self.sql(expression, 'expression')}"
 
+        def ydbdeleteon_sql(self, expression: YdbDeleteOn) -> str:
+            return f"DELETE FROM {self.sql(expression, 'this')} ON {self.sql(expression, 'expression')}"
+
         def insert_sql(self, expression: exp.Insert) -> str:
             sql = super().insert_sql(expression)
-            if expression.meta.get("ydb_upsert") and sql.startswith("INSERT"):
-                return f"UPSERT{sql[len('INSERT'):]}"
+            statement = None
+            if expression.meta.get("ydb_upsert"):
+                statement = "UPSERT"
+            elif expression.meta.get("ydb_replace"):
+                statement = "REPLACE"
+
+            if statement and sql.startswith("INSERT"):
+                return f"{statement}{sql[len('INSERT'):]}"
             return sql
 
         def ydbbitwiserotleft_sql(self, expression: YdbBitwiseRotLeft) -> str:
@@ -4720,6 +4770,7 @@ class YDB(Dialect):
             YdbPostfixCall: lambda self, e: self.ydbpostfixcall_sql(e),
             YdbNamedTupleAssign: lambda self, e: self.ydbnamedtupleassign_sql(e),
             YdbUpdateOn: lambda self, e: self.ydbupdateon_sql(e),
+            YdbDeleteOn: lambda self, e: self.ydbdeleteon_sql(e),
             YdbBitwiseRotLeft: lambda self, e: self.ydbbitwiserotleft_sql(e),
             YdbBitwiseRotRight: lambda self, e: self.ydbbitwiserotright_sql(e),
             YdbSecondaryIndex: lambda self, e: self.ydbsecondaryindex_sql(e),

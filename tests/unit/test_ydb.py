@@ -129,6 +129,12 @@ class TestYDBIdentity(Validator):
         self.validate_identity("SELECT 'Hello, world!'")
         self.validate_identity("SELECT 2 + 2")
 
+    def test_drop_table_doc_example(self):
+        self.validate_identity(
+            "DROP TABLE my_table",
+            write_sql="DROP TABLE `my_table`",
+        )
+
     def test_select_overview_doc_ordered_columns_pragma(self):
         generated = ";\n".join(
             expression.sql(dialect="ydb")
@@ -2863,6 +2869,12 @@ class TestYDBFromPostgres(unittest.TestCase):
         self.assertEqual(
             self.pg("SELECT id, name FROM users WHERE active IS TRUE ORDER BY id DESC LIMIT 10 OFFSET 5"),
             "SELECT id, name FROM `users` WHERE active IS TRUE ORDER BY id DESC LIMIT 10 OFFSET 5",
+        )
+
+    def test_drop_table(self):
+        self.assertEqual(
+            self.pg("DROP TABLE my_table"),
+            "DROP TABLE `my_table`",
         )
 
     def test_cte_becomes_ydb_named_expression(self):
