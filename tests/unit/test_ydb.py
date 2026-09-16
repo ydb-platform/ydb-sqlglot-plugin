@@ -1516,12 +1516,9 @@ class TestYDBParser(Validator):
             "DisableAnsiRankForNullableKeys",
             "AnsiCurrentRow",
             "AnsiOrderByLimitInUnionAll",
-            "DisableAnsiOrderByLimitInUnionAll",
             "OrderedColumns",
             "DisableOrderedColumns",
             "PositionalUnionAll",
-            "RegexUseRe2",
-            "ClassicDivision",
             "UnicodeLiterals",
             "DisableUnicodeLiterals",
             "WarnUntypedStringLiterals",
@@ -1539,8 +1536,10 @@ class TestYDBParser(Validator):
     def test_pragma_doc_settings_with_values(self):
         cases = {
             'PRAGMA TablePathPrefix = "home/yql"': "PRAGMA TablePathPrefix = 'home/yql'",
-            "PRAGMA GroupByLimit = 64": "PRAGMA GroupByLimit = 64",
-            "PRAGMA GroupByCubeLimit = 8": "PRAGMA GroupByCubeLimit = 8",
+            'PRAGMA GroupByLimit = "64"': "PRAGMA GroupByLimit = '64'",
+            'PRAGMA GroupByCubeLimit = "8"': "PRAGMA GroupByCubeLimit = '8'",
+            'PRAGMA RegexUseRe2 = "true"': "PRAGMA RegexUseRe2 = 'true'",
+            'PRAGMA ClassicDivision = "true"': "PRAGMA ClassicDivision = 'true'",
             'PRAGMA yson.Strict = "true"': "PRAGMA yson.Strict = 'true'",
             'PRAGMA yson.Strict = "false"': "PRAGMA yson.Strict = 'false'",
             'PRAGMA yson.DisableStrict = "true"': "PRAGMA yson.DisableStrict = 'true'",
@@ -1549,6 +1548,21 @@ class TestYDBParser(Validator):
         for sql, expected in cases.items():
             with self.subTest(sql=sql):
                 self.validate_identity(sql, write_sql=expected)
+
+    def test_pragma_doc_assignment_rejects_non_string_value(self):
+        with self.assertRaises(UnsupportedError):
+            self.parse_one("PRAGMA GroupByLimit = 64").sql(dialect="ydb")
+
+    def test_pragma_rejects_forms_not_accepted_by_ydb(self):
+        cases = (
+            "PRAGMA RegexUseRe2",
+            "PRAGMA ClassicDivision",
+            'PRAGMA RegexUseRe2 = "yes"',
+            "PRAGMA DisableAnsiOrderByLimitInUnionAll",
+        )
+        for sql in cases:
+            with self.subTest(sql=sql), self.assertRaises(UnsupportedError):
+                self.parse_one(sql).sql(dialect="ydb")
 
     def test_pragma_doc_warning_examples(self):
         sql = (
@@ -1579,28 +1593,6 @@ class TestYDBParser(Validator):
             "PRAGMA TablePathPrefix = 'home/yql';\nSELECT * FROM `test`",
             generated,
         )
-
-    def test_pragma_doc_scoped_pragmas_in_lambda(self):
-        scoped_pragmas = (
-            "StrictJoinKeyTypes",
-            "DisableStrictJoinKeyTypes",
-            "ClassicDivision",
-            "UnicodeLiterals",
-            "DisableUnicodeLiterals",
-            "WarnUntypedStringLiterals",
-            "DisableWarnUntypedStringLiterals",
-        )
-        for pragma in scoped_pragmas:
-            with self.subTest(pragma=pragma):
-                self.validate_identity(f"($x) -> {{ PRAGMA {pragma}; RETURN $x }}")
-        self.validate_identity(
-            '($x) -> { PRAGMA ClassicDivision = "false"; RETURN $x / 2 }',
-            write_sql="($x) -> { PRAGMA ClassicDivision = 'false'; RETURN $x / 2 }",
-        )
-
-    def test_pragma_doc_regular_pragma_is_global_only(self):
-        with self.assertRaises(ParseError):
-            self.parse_one("($x) -> { PRAGMA AutoCommit; RETURN $x }")
 
     # --- $varname -----------------------------------------------------------
 

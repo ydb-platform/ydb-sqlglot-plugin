@@ -554,7 +554,7 @@ class YdbJsonPassingItem(exp.Expression):
 
 
 class YdbLambdaBlock(exp.Expression):
-    """YDB lambda body with local statements followed by RETURN."""
+    """YDB lambda body with local named expressions followed by RETURN."""
     arg_types = {"this": True, "expressions": False}
 
 
@@ -563,17 +563,6 @@ _YDB_GENERIC_TYPES = {
     "List": exp.DataType.Type.LIST,
     "Dict": exp.DataType.Type.MAP,
     "Set": exp.DataType.Type.SET,
-}
-
-
-_YDB_SCOPED_PRAGMAS = {
-    "strictjoinkeytypes",
-    "disablestrictjoinkeytypes",
-    "classicdivision",
-    "unicodeliterals",
-    "disableunicodeliterals",
-    "warnuntypedstringliterals",
-    "disablewarnuntypedstringliterals",
 }
 
 
@@ -2180,27 +2169,17 @@ class YDB(Dialect):
 
         def _parse_ydb_lambda(self, params):
             has_brace = self._match(TokenType.L_BRACE)
-            statements = []
+            assignments = []
 
             if has_brace:
                 while self._curr and self._curr.text.upper() != "RETURN":
                     index = self._index
-                    if self._curr.token_type == TokenType.PARAMETER:
-                        statement = self._parse_ydb_named_expr()
-                    elif self._curr.token_type == TokenType.PRAGMA:
-                        pragma_token = self._curr
-                        statement = self._parse_statement()
-                        pragma_name = self._ydb_pragma_name(statement)
-                        if pragma_name.lower() not in _YDB_SCOPED_PRAGMAS:
-                            self.raise_error(
-                                f"PRAGMA {pragma_name} is only valid in global scope",
-                                token=pragma_token,
-                            )
-                    else:
-                        self.raise_error("Expected lambda body statement or RETURN after '->'")
-                    if not statement:
+                    if self._curr.token_type != TokenType.PARAMETER:
+                        self.raise_error("Expected lambda body assignment or RETURN after '->'")
+                    assignment = self._parse_ydb_named_expr()
+                    if not assignment:
                         self.raise_error("Expected lambda body expression after '->'")
-                    statements.append(statement)
+                    assignments.append(assignment)
                     self._match(TokenType.SEMICOLON)
                     if self._index <= index:
                         self.raise_error("Expected lambda body parser to consume input")
@@ -2216,19 +2195,10 @@ class YDB(Dialect):
             self._match(TokenType.SEMICOLON)
             if has_brace:
                 self._match(TokenType.R_BRACE, expression=body)
-                if statements:
-                    body = self.expression(YdbLambdaBlock(this=body, expressions=statements))
+                if assignments:
+                    body = self.expression(YdbLambdaBlock(this=body, expressions=assignments))
 
             return self.expression(exp.Lambda(this=body, expressions=params))
-
-        @staticmethod
-        def _ydb_pragma_name(statement: t.Optional[exp.Expression]) -> str:
-            pragma = statement.this if isinstance(statement, exp.Pragma) else None
-            if isinstance(pragma, exp.EQ):
-                pragma = pragma.this
-            if isinstance(pragma, exp.Dot):
-                pragma = pragma.expression
-            return pragma.name if isinstance(pragma, exp.Expression) else ""
 
         def _parse_bitwise(self) -> t.Optional[exp.Expression]:
             this = self._parse_term()
@@ -2478,6 +2448,49 @@ class YDB(Dialect):
                 sql += f" AS {expression.alias}"
 
             return _with_table_joins(sql)
+
+        def pragma_sql(self, expression: exp.Pragma) -> str:
+            pragma = expression.this
+            assignment = pragma if isinstance(pragma, exp.EQ) else None
+            target = assignment.this if assignment else pragma
+            name = target.name.lower()
+
+            if name == "disableansiorderbylimitinunionall":
+                raise UnsupportedError(
+                    "YDB no longer supports PRAGMA DisableAnsiOrderByLimitInUnionAll"
+                )
+
+            if isinstance(assignment, exp.EQ):
+                value = assignment.expression
+                is_default = (
+                    isinstance(value, (exp.Column, exp.Var))
+                    and value.name.lower() == "default"
+                    and not getattr(value, "table", None)
+                )
+                if not (isinstance(value, exp.Literal) and value.is_string) and not is_default:
+                    raise UnsupportedError(
+                        "YDB PRAGMA assignment values must be strings or default"
+                    )
+
+            if name in ("regexusere2", "classicdivision"):
+                if assignment:
+                    values = [assignment.expression]
+                elif isinstance(pragma, exp.Anonymous):
+                    values = pragma.expressions
+                else:
+                    values = []
+
+                if (
+                    len(values) != 1
+                    or not isinstance(values[0], exp.Literal)
+                    or not values[0].is_string
+                    or values[0].this.lower() not in ("true", "false")
+                ):
+                    raise UnsupportedError(
+                        f"YDB PRAGMA {target.name} requires a true or false string value"
+                    )
+
+            return super().pragma_sql(expression)
 
         def is_sql(self, expression: exp.Is) -> str:
             """
@@ -3935,7 +3948,6 @@ class YDB(Dialect):
                 if (
                     isinstance(node, exp.Identifier)
                     and not node.name.startswith("$")
-                    and not node.find_ancestor(exp.Pragma)
                 ):
                     return exp.Identifier(this=f"${node.name}", quoted=False)
                 return node
