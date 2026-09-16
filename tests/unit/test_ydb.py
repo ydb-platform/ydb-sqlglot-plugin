@@ -220,6 +220,40 @@ class TestYDBIdentity(Validator):
             "Value AS Value1 FROM `my_table1`",
         )
 
+    def test_commit_doc_standalone_statement(self):
+        statements = parse("COMMIT;", dialect="ydb", error_level=ErrorLevel.RAISE)
+
+        self.assertEqual(["COMMIT"], [statement.sql(dialect="ydb") for statement in statements])
+
+    def test_commit_doc_barrier_example(self):
+        sql = (
+            "INSERT INTO result1 SELECT * FROM my_table;\n"
+            "INSERT INTO result2 SELECT * FROM my_table;\n"
+            "COMMIT;\n"
+            "-- result2 will already include the SELECT contents from the second line:\n"
+            "INSERT INTO result3 SELECT * FROM result2;"
+        )
+        statements = parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+
+        self.assertEqual(
+            [
+                "INSERT INTO `result1` SELECT * FROM `my_table`",
+                "INSERT INTO `result2` SELECT * FROM `my_table`",
+                "COMMIT",
+                "/* result2 will already include the SELECT contents from the second line: */ "
+                "INSERT INTO `result3` SELECT * FROM `result2`",
+            ],
+            [statement.sql(dialect="ydb") for statement in statements],
+        )
+
+    def test_commit_doc_autocommit_alternative(self):
+        statements = parse("PRAGMA autocommit;", dialect="ydb", error_level=ErrorLevel.RAISE)
+
+        self.assertEqual(
+            ["PRAGMA autocommit"],
+            [statement.sql(dialect="ydb") for statement in statements],
+        )
+
     @unittest.skip("External data source INSERT options are not supported yet")
     def test_insert_into_external_file_doc_snippet(self):
         self.validate_identity(
