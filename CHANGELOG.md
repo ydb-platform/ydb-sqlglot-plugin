@@ -2,7 +2,7 @@
 * Preserve source-dialect NULL semantics when transpiling `CONCAT` to YDB across supported SQLGlot versions
 * Support the renamed set-operation scope type on upcoming SQLGlot releases
 * Document that external dialects require pure-Python SQLGlot
-* Add nightly compatibility checks against SQLGlot main
+* Add nightly compatibility checks against the latest SQLGlot release on PyPI
 
 ## 0.2.8 ##
 * Add yql sqlglot dialect entry point
