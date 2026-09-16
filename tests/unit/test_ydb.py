@@ -1568,6 +1568,46 @@ class TestYDBParser(Validator):
 
     # --- DECLARE $p AS Type -------------------------------------------------
 
+    def test_declare_doc_example(self):
+        sql = (
+            "DECLARE $x AS String;\n"
+            "DECLARE $y AS String?;\n"
+            "DECLARE $z AS List<String>;\n\n"
+            "SELECT $x, $y, $z;"
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(
+            "DECLARE $x AS String;\n"
+            "DECLARE $y AS Optional<String>;\n"
+            "DECLARE $z AS List<String>;\n"
+            "SELECT $x, $y, $z",
+            generated,
+        )
+
+    def test_declare_doc_special_types(self):
+        self.validate_identity("DECLARE $nothing AS Void")
+        self.validate_identity("DECLARE $nothing AS Null")
+
+    def test_declare_doc_parameter_requires_dollar_prefix(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("DECLARE value AS String", error_level=ErrorLevel.RAISE)
+
+    def test_declare_doc_requires_as_keyword(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("DECLARE $value String", error_level=ErrorLevel.RAISE)
+
+    def test_declare_doc_requires_data_type(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("DECLARE $value AS", error_level=ErrorLevel.RAISE)
+
+    def test_declare_doc_rejects_stream_type(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("DECLARE $values AS Stream<String>", error_level=ErrorLevel.RAISE)
+
     def test_declare_utf8(self):
         self.validate_identity("DECLARE $name AS Utf8")
 
