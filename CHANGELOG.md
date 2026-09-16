@@ -1,3 +1,4 @@
+* Parse documented scoped PRAGMA settings inside YDB lambda blocks
 * Preserve source-dialect NULL semantics when transpiling `CONCAT` to YDB across supported SQLGlot versions
 * Support the renamed set-operation scope type on upcoming SQLGlot releases
 

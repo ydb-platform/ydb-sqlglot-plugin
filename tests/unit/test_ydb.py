@@ -1478,6 +1478,130 @@ class TestYDBParser(Validator):
         )
         self.assertEqual(generated, regenerated)
 
+    # --- PRAGMA -------------------------------------------------------------
+
+    def test_pragma_doc_syntax_forms(self):
+        cases = {
+            "PRAGMA AutoCommit": "PRAGMA AutoCommit",
+            'PRAGMA TablePathPrefix = "home/yql"': "PRAGMA TablePathPrefix = 'home/yql'",
+            'PRAGMA Warning("disable", "1101")': "PRAGMA Warning('disable', '1101')",
+            'PRAGMA x.y("z", "z2", "z3")': "PRAGMA x.y('z', 'z2', 'z3')",
+            "PRAGMA my_pragma = default": "PRAGMA my_pragma = default",
+        }
+        for sql, expected in cases.items():
+            with self.subTest(sql=sql):
+                self.validate_identity(sql, write_sql=expected)
+
+    def test_pragma_doc_value_suffixes(self):
+        for suffix in ("Kb", "Mb", "Gb", "sec", "min", "h", "d"):
+            with self.subTest(suffix=suffix):
+                self.validate_identity(
+                    f'PRAGMA x.y = "1{suffix}"',
+                    write_sql=f"PRAGMA x.y = '1{suffix}'",
+                )
+
+    def test_pragma_doc_global_flags(self):
+        flags = (
+            "AutoCommit",
+            "UseTablePrefixForEach",
+            "SimpleColumns",
+            "DisableSimpleColumns",
+            "CoalesceJoinKeysOnQualifiedAll",
+            "DisableCoalesceJoinKeysOnQualifiedAll",
+            "StrictJoinKeyTypes",
+            "DisableStrictJoinKeyTypes",
+            "AnsiInForEmptyOrNullableItemsCollections",
+            "DisableAnsiInForEmptyOrNullableItemsCollections",
+            "AnsiRankForNullableKeys",
+            "DisableAnsiRankForNullableKeys",
+            "AnsiCurrentRow",
+            "AnsiOrderByLimitInUnionAll",
+            "DisableAnsiOrderByLimitInUnionAll",
+            "OrderedColumns",
+            "DisableOrderedColumns",
+            "PositionalUnionAll",
+            "RegexUseRe2",
+            "ClassicDivision",
+            "UnicodeLiterals",
+            "DisableUnicodeLiterals",
+            "WarnUntypedStringLiterals",
+            "DisableWarnUntypedStringLiterals",
+            "AllowDotInAlias",
+            "WarnUnnamedColumns",
+            "yson.AutoConvert",
+            "yson.Strict",
+            "yson.DisableStrict",
+        )
+        for flag in flags:
+            with self.subTest(flag=flag):
+                self.validate_identity(f"PRAGMA {flag}")
+
+    def test_pragma_doc_settings_with_values(self):
+        cases = {
+            'PRAGMA TablePathPrefix = "home/yql"': "PRAGMA TablePathPrefix = 'home/yql'",
+            "PRAGMA GroupByLimit = 64": "PRAGMA GroupByLimit = 64",
+            "PRAGMA GroupByCubeLimit = 8": "PRAGMA GroupByCubeLimit = 8",
+            'PRAGMA yson.Strict = "true"': "PRAGMA yson.Strict = 'true'",
+            'PRAGMA yson.Strict = "false"': "PRAGMA yson.Strict = 'false'",
+            'PRAGMA yson.DisableStrict = "true"': "PRAGMA yson.DisableStrict = 'true'",
+            'PRAGMA yson.DisableStrict = "false"': "PRAGMA yson.DisableStrict = 'false'",
+        }
+        for sql, expected in cases.items():
+            with self.subTest(sql=sql):
+                self.validate_identity(sql, write_sql=expected)
+
+    def test_pragma_doc_warning_examples(self):
+        sql = (
+            'PRAGMA Warning("error", "*");\n'
+            'PRAGMA Warning("disable", "1101");\n'
+            'PRAGMA Warning("default", "4503");'
+        )
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA Warning('error', '*');\n"
+            "PRAGMA Warning('disable', '1101');\n"
+            "PRAGMA Warning('default', '4503')",
+            generated,
+        )
+
+    def test_pragma_doc_table_path_prefix_example(self):
+        sql = 'PRAGMA TablePathPrefix = "home/yql"; SELECT * FROM test;'
+        generated = ";\n".join(
+            expression.sql(dialect="ydb")
+            for expression in parse(sql, dialect="ydb", error_level=ErrorLevel.RAISE)
+            if expression is not None
+        )
+        self.assertEqual(
+            "PRAGMA TablePathPrefix = 'home/yql';\nSELECT * FROM `test`",
+            generated,
+        )
+
+    def test_pragma_doc_scoped_pragmas_in_lambda(self):
+        scoped_pragmas = (
+            "StrictJoinKeyTypes",
+            "DisableStrictJoinKeyTypes",
+            "ClassicDivision",
+            "UnicodeLiterals",
+            "DisableUnicodeLiterals",
+            "WarnUntypedStringLiterals",
+            "DisableWarnUntypedStringLiterals",
+        )
+        for pragma in scoped_pragmas:
+            with self.subTest(pragma=pragma):
+                self.validate_identity(f"($x) -> {{ PRAGMA {pragma}; RETURN $x }}")
+        self.validate_identity(
+            '($x) -> { PRAGMA ClassicDivision = "false"; RETURN $x / 2 }',
+            write_sql="($x) -> { PRAGMA ClassicDivision = 'false'; RETURN $x / 2 }",
+        )
+
+    def test_pragma_doc_regular_pragma_is_global_only(self):
+        with self.assertRaises(ParseError):
+            self.parse_one("($x) -> { PRAGMA AutoCommit; RETURN $x }")
+
     # --- $varname -----------------------------------------------------------
 
     def test_dollar_variable_in_expr(self):
