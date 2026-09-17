@@ -980,13 +980,16 @@ class YDB(Dialect):
                 return None
             name = self._parse_var(any_token=True)
             if not name:
-                return None
-            self._match(TokenType.ALIAS)
+                self.raise_error("Expected parameter name after '$'")
+            if not self._match(TokenType.ALIAS):
+                self.raise_error("Expected AS after DECLARE parameter")
             if self._curr and self._curr.token_type == TokenType.STRING:
                 kind = exp.Var(this=f'"{self._curr.text}"')
                 self._advance()
             else:
                 kind = self._parse_types()
+            if not kind:
+                self.raise_error("Expected data type after AS")
             comments = self._prev.comments if self._prev else None
             return self.expression(
                 exp.DeclareItem(this=name, kind=kind),
@@ -2974,7 +2977,11 @@ class YDB(Dialect):
                         exp.DataType.build("float") if size <= 32 else exp.DataType.build("double")
                     )
 
-            sql = super().datatype_sql(expression)
+            sql = (
+                "Null"
+                if expression.is_type(exp.DataType.Type.NULL)
+                else super().datatype_sql(expression)
+            )
             if nullable:
                 sql = f"Optional<{sql}>"
             return sql
