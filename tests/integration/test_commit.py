@@ -12,7 +12,9 @@ def render_script(source: str) -> str:
 
 def test_commit_barrier_executes(ydb_driver, ydb_pool):
     table = "integ_commit_conformance"
-    ydb_pool.execute_with_retries(f"CREATE TABLE `{table}` (id Int64 NOT NULL, value Utf8, PRIMARY KEY (id))")
+    ydb_pool.execute_with_retries(
+        f"CREATE TABLE IF NOT EXISTS `{table}` (id Int64 NOT NULL, value Utf8, PRIMARY KEY (id))"
+    )
 
     try:
         yql = render_script(
@@ -28,4 +30,4 @@ def test_commit_barrier_executes(ydb_driver, ydb_pool):
             (2, "after"),
         ]
     finally:
-        ydb_pool.execute_with_retries(f"DROP TABLE `{table}`")
+        ydb_pool.execute_with_retries(f"DROP TABLE IF EXISTS `{table}`")
