@@ -2449,6 +2449,49 @@ class YDB(Dialect):
 
             return _with_table_joins(sql)
 
+        def pragma_sql(self, expression: exp.Pragma) -> str:
+            pragma = expression.this
+            assignment = pragma if isinstance(pragma, exp.EQ) else None
+            target = assignment.this if assignment else pragma
+            name = target.name.lower()
+
+            if name == "disableansiorderbylimitinunionall":
+                raise UnsupportedError(
+                    "YDB no longer supports PRAGMA DisableAnsiOrderByLimitInUnionAll"
+                )
+
+            if isinstance(assignment, exp.EQ):
+                value = assignment.expression
+                is_default = (
+                    isinstance(value, (exp.Column, exp.Var))
+                    and value.name.lower() == "default"
+                    and not getattr(value, "table", None)
+                )
+                if not (isinstance(value, exp.Literal) and value.is_string) and not is_default:
+                    raise UnsupportedError(
+                        "YDB PRAGMA assignment values must be strings or default"
+                    )
+
+            if name in ("regexusere2", "classicdivision"):
+                if assignment:
+                    values = [assignment.expression]
+                elif isinstance(pragma, exp.Anonymous):
+                    values = pragma.expressions
+                else:
+                    values = []
+
+                if (
+                    len(values) != 1
+                    or not isinstance(values[0], exp.Literal)
+                    or not values[0].is_string
+                    or values[0].this.lower() not in ("true", "false")
+                ):
+                    raise UnsupportedError(
+                        f"YDB PRAGMA {target.name} requires a true or false string value"
+                    )
+
+            return super().pragma_sql(expression)
+
         def is_sql(self, expression: exp.Is) -> str:
             """
             Generate SQL for IS expressions with special handling for IS NOT NULL.

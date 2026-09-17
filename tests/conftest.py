@@ -17,13 +17,8 @@ def _ydb_reachable() -> bool:
 
 
 @pytest.fixture(scope="session")
-def ydb_pool():
-    """Session-scoped YDB QuerySessionPool.
-
-    Skips the entire test session if YDB is not reachable, so integration
-    tests are silently skipped when Docker is not running.
-    Start YDB with: docker compose up -d
-    """
+def ydb_driver():
+    """Session-scoped YDB driver, skipped when local YDB is unavailable."""
     if not _ydb_reachable():
         pytest.skip("YDB not available — run: docker compose up -d")
 
@@ -33,6 +28,12 @@ def ydb_pool():
         credentials=ydb.AnonymousCredentials(),
     )
     driver.wait(timeout=10, fail_fast=True)
-    with ydb.QuerySessionPool(driver) as pool:
-        yield pool
+    yield driver
     driver.stop()
+
+
+@pytest.fixture(scope="session")
+def ydb_pool(ydb_driver):
+    """Session-scoped YDB QuerySessionPool."""
+    with ydb.QuerySessionPool(ydb_driver) as pool:
+        yield pool
