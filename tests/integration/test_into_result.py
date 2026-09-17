@@ -7,6 +7,8 @@ def test_into_result_labels_execute(ydb_pool):
     cases = (
         ("SELECT 1 AS value INTO RESULT result", 1),
         ("SELECT 2 AS value INTO RESULT `Result name`", 2),
+        ("SELECT DISTINCT 1 + 1 AS value INTO RESULT distinct_result", 2),
+        ("SELECT 1 + 1 AS value GROUP BY 1 + 1 INTO RESULT grouped_result", 2),
     )
 
     for source, expected in cases:

@@ -269,7 +269,8 @@ def _wrap_udf_group_by(expression: exp.Expression) -> None:
                 k: v.copy() if v is not None else None
                 for k, v in select.args.items()
                 if k not in ("expressions", "group", "having", "order",
-                             "limit", "offset", "distinct", "operation_modifiers")
+                             "limit", "offset", "distinct", "operation_modifiers",
+                             "into_result")
             }
         )
         subq_alias = f"_subq_{next(_subq_alias_seq)}"
@@ -1602,6 +1603,9 @@ class YDB(Dialect):
                 and self._curr.token_type == TokenType.INTO
                 and self._next
                 and self._next.text.upper() == "RESULT"
+                and self._index + 2 < len(self._tokens)
+                and self._tokens[self._index + 2].token_type
+                in (TokenType.VAR, TokenType.IDENTIFIER)
             ):
                 return None
 
@@ -1624,7 +1628,7 @@ class YDB(Dialect):
                 if not self._match_text_seq("RESULT"):
                     self.raise_error("Expected RESULT after INTO")
 
-                label = self._parse_id_var()
+                label = self._parse_id_var(any_token=False, tokens={TokenType.VAR})
                 if not label:
                     self.raise_error("Expected label after INTO RESULT")
                 if this:
@@ -4343,11 +4347,15 @@ class YDB(Dialect):
             inner = expression.copy()
             inner.set("distinct", None)
             inner.set("expressions", inner_expressions)
+            inner.set("into_result", None)
 
             outer = exp.Select(
                 distinct=expression.args["distinct"].copy(),
                 expressions=[exp.column(alias) for alias in aliases],
             )
+            into_result = expression.args.get("into_result")
+            if into_result:
+                outer.set("into_result", into_result.copy())
             outer.set(
                 "from_",
                 exp.From(

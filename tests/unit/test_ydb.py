@@ -2494,6 +2494,31 @@ class TestYDBAdvancedSyntax(Validator):
             ),
         )
 
+    def test_into_result_distinct_calculated_projection(self):
+        self.validate_identity(
+            "SELECT DISTINCT value + 1 FROM t INTO RESULT foo",
+            write_sql=(
+                "SELECT DISTINCT _distinct_0 FROM "
+                "(SELECT value + 1 AS _distinct_0 FROM `t`) AS _distinct "
+                "INTO RESULT foo"
+            ),
+        )
+
+    def test_into_result_complex_group_by_is_only_on_outer_query(self):
+        generated = self.parse_one(
+            "SELECT value + 1 AS v FROM t GROUP BY value + 1 INTO RESULT foo"
+        ).sql(dialect="ydb")
+
+        self.assertEqual(generated.count("INTO RESULT foo"), 1)
+        self.assertNotIn("FROM `t` INTO RESULT foo", generated)
+        self.assertTrue(generated.endswith("GROUP BY v AS v INTO RESULT foo"))
+
+    def test_select_into_table_named_result_uses_standard_parser(self):
+        self.validate_identity(
+            "SELECT value INTO result FROM source",
+            write_sql="CREATE TABLE `result` AS SELECT value FROM `source`",
+        )
+
     def test_variable_call_expression(self):
         sql = (
             "$grep = Re2::Grep($needle);\n"
