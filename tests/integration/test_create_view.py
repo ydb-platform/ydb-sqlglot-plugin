@@ -7,10 +7,13 @@ def test_ydb_create_view_options_execute(ydb_pool):
     table = "integ_create_view_source"
     view = "integ_create_view_ydb"
     view_created = False
-    ydb_pool.execute_with_retries(f"CREATE TABLE `{table}` (id Int64 NOT NULL, value Utf8, PRIMARY KEY (id))")
-    ydb_pool.execute_with_retries(f"UPSERT INTO `{table}` (id, value) VALUES (1, 'visible')")
 
     try:
+        ydb_pool.execute_with_retries(
+            f"CREATE TABLE IF NOT EXISTS `{table}` (id Int64 NOT NULL, value Utf8, PRIMARY KEY (id))"
+        )
+        ydb_pool.execute_with_retries(f"UPSERT INTO `{table}` (id, value) VALUES (1, 'visible')")
+
         source = f"CREATE VIEW IF NOT EXISTS {view} WITH (security_invoker) AS SELECT id, value FROM `{table}`"
         yql = parse_one(source, dialect="ydb").sql(dialect="ydb")
         ydb_pool.execute_with_retries(yql)
@@ -22,7 +25,7 @@ def test_ydb_create_view_options_execute(ydb_pool):
     finally:
         if view_created:
             ydb_pool.execute_with_retries(f"DROP VIEW {view}")
-        ydb_pool.execute_with_retries(f"DROP TABLE `{table}`")
+        ydb_pool.execute_with_retries(f"DROP TABLE IF EXISTS `{table}`")
 
 
 def test_postgres_create_view_transpilation_executes(ydb_pool):
