@@ -269,7 +269,8 @@ def _wrap_udf_group_by(expression: exp.Expression) -> None:
                 k: v.copy() if v is not None else None
                 for k, v in select.args.items()
                 if k not in ("expressions", "group", "having", "order",
-                             "limit", "offset", "distinct", "operation_modifiers")
+                             "limit", "offset", "distinct", "operation_modifiers",
+                             "into_result")
             }
         )
         subq_alias = f"_subq_{next(_subq_alias_seq)}"
@@ -1596,6 +1597,20 @@ class YDB(Dialect):
                 return [exp.Var(this=self.sql[start:end + 1])]
             return None
 
+        def _parse_into(self) -> t.Optional[exp.Into]:
+            if (
+                self._curr
+                and self._curr.token_type == TokenType.INTO
+                and self._next
+                and self._next.text.upper() == "RESULT"
+                and self._index + 2 < len(self._tokens)
+                and self._tokens[self._index + 2].token_type
+                in (TokenType.VAR, TokenType.IDENTIFIER)
+            ):
+                return None
+
+            return super()._parse_into()
+
         def _parse_query_modifiers(self, this):
             if (
                 self._curr
@@ -1607,7 +1622,19 @@ class YDB(Dialect):
                 _, order = self.QUERY_MODIFIER_PARSERS[TokenType.ORDER_BY](self)
                 if order and this:
                     this.set("order", self.expression(AssumeOrderBy(this=order)))
-            return super()._parse_query_modifiers(this)
+            this = super()._parse_query_modifiers(this)
+
+            if self._match(TokenType.INTO):
+                if not self._match_text_seq("RESULT"):
+                    self.raise_error("Expected RESULT after INTO")
+
+                label = self._parse_id_var(any_token=False, tokens={TokenType.VAR})
+                if not label:
+                    self.raise_error("Expected label after INTO RESULT")
+                if this:
+                    this.set("into_result", label)
+
+            return this
 
         def _parse_partition_by(self) -> t.List[exp.Expression]:
             if self._match(TokenType.PARTITION_BY):
@@ -4282,7 +4309,9 @@ class YDB(Dialect):
                         self.expression_to_alias[expr_sql] = select_expr.alias_or_name
             # in .sql() calls ww generated ydb_variables, drop it not to produce unused vars
             self.ydb_variables = {}
-            return super().select_sql(expression)
+            sql = super().select_sql(expression)
+            into_result = self.sql(expression, "into_result")
+            return f"{sql} INTO RESULT {into_result}" if into_result else sql
 
         def hint_sql(self, expression: exp.Hint) -> str:
             hints = [str(hint).strip() for hint in expression.expressions if str(hint).strip()]
@@ -4318,11 +4347,15 @@ class YDB(Dialect):
             inner = expression.copy()
             inner.set("distinct", None)
             inner.set("expressions", inner_expressions)
+            inner.set("into_result", None)
 
             outer = exp.Select(
                 distinct=expression.args["distinct"].copy(),
                 expressions=[exp.column(alias) for alias in aliases],
             )
+            into_result = expression.args.get("into_result")
+            if into_result:
+                outer.set("into_result", into_result.copy())
             outer.set(
                 "from_",
                 exp.From(
