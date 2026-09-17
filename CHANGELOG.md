@@ -1,4 +1,3 @@
-* Enforce the documented DECLARE grammar and preserve the YDB `Null` type spelling
 * Preserve source-dialect NULL semantics when transpiling `CONCAT` to YDB across supported SQLGlot versions
 * Support the renamed set-operation scope type on upcoming SQLGlot releases
 
