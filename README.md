@@ -87,7 +87,7 @@ cases. An unchecked item is a backlog item.
 - [ ] [CREATE TRANSFER](https://ydb.tech/docs/en/yql/reference/syntax/create-transfer)
 - [ ] [ALTER TRANSFER](https://ydb.tech/docs/en/yql/reference/syntax/alter-transfer)
 - [ ] [DROP TRANSFER](https://ydb.tech/docs/en/yql/reference/syntax/drop-transfer)
-- [ ] [COMMIT](https://ydb.tech/docs/en/yql/reference/syntax/commit)
+- [x] [COMMIT](https://ydb.tech/docs/en/yql/reference/syntax/commit) - `test_commit_doc_*`
 - [ ] [CREATE VIEW](https://ydb.tech/docs/en/yql/reference/syntax/create-view)
 - [ ] [ALTER VIEW](https://ydb.tech/docs/en/yql/reference/syntax/alter-view)
 - [ ] [DROP VIEW](https://ydb.tech/docs/en/yql/reference/syntax/drop-view)
