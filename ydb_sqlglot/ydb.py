@@ -6,7 +6,7 @@ from functools import reduce
 
 from sqlglot import Generator, TokenType, exp, generator, parser, tokens, transforms
 from sqlglot.dialects.dialect import Dialect, NormalizationStrategy, unit_to_var
-from sqlglot.errors import UnsupportedError
+from sqlglot.errors import TokenError, UnsupportedError
 from sqlglot.expressions import Expression
 from sqlglot.helper import ensure_list, flatten, name_sequence, seq_get
 from sqlglot.optimizer.scope import ScopeType, find_in_scope, traverse_scope
@@ -99,6 +99,32 @@ _YDB_INTEGER_SUFFIXES = {"l", "s", "t", "u", "ul", "us", "ut", "lu"}
 _YDB_FLOAT_SUFFIXES = {"f"}
 _YDB_NUMBER_SUFFIXES = _YDB_INTEGER_SUFFIXES | _YDB_FLOAT_SUFFIXES
 _YDB_INTEGER_PREFIXES = ("x", "o", "b")
+_YDB_IDENTIFIER_ESCAPE_RE = re.compile(
+    rb"``|\\(?:x[0-9a-fA-F]{2}|[0-3][0-7]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)",
+    re.DOTALL,
+)
+_YDB_IDENTIFIER_ESCAPES = {
+    b"a": b"\a", b"b": b"\b", b"f": b"\f", b"n": b"\n",
+    b"r": b"\r", b"t": b"\t", b"v": b"\v",
+}
+
+
+def _unescape_ydb_identifier(text: str) -> str:
+    def replace(match: t.Match[bytes]) -> bytes:
+        sequence = match.group()
+        if sequence == b"``":
+            return b"`"
+        escape = sequence[1:]
+        if len(escape) == 3 and escape.startswith(b"x"):
+            return bytes([int(escape[1:], 16)])
+        if len(escape) == 3 and escape[:1] in b"0123":
+            return bytes([int(escape, 8)])
+        if len(escape) > 1 and escape[:1] in (b"u", b"U"):
+            return chr(int(escape[1:], 16)).encode("utf-8")
+        return _YDB_IDENTIFIER_ESCAPES.get(escape, escape)
+
+    # Numeric C escapes encode UTF-8 bytes, including consecutive escapes for one character.
+    return _YDB_IDENTIFIER_ESCAPE_RE.sub(replace, text.encode("utf-8")).decode("utf-8")
 
 
 def _alias_order_by_aggregates(expression: exp.Expression) -> None:
@@ -716,6 +742,19 @@ class YDB(Dialect):
         COMMENTS = ["--", ("/*", "*/")]
         IDENTIFIERS = ["`"]
         IDENTIFIER_ESCAPES = ["\\"]
+
+        def tokenize(self, sql: str) -> t.List[tokens.Token]:
+            result = super().tokenize(sql)
+            for token in result:
+                if token.token_type == TokenType.IDENTIFIER:
+                    raw = sql[token.start:token.end + 1]
+                    if raw.startswith("`") and "\\" in raw:
+                        try:
+                            # Decode the source so literal \\xNN is not unescaped twice.
+                            token.text = _unescape_ydb_identifier(raw[1:-1])
+                        except (UnicodeError, ValueError) as error:
+                            raise TokenError("Invalid escaped YDB identifier") from error
+            return result
 
     class Parser(parser.Parser):
         ARRAY_CONSTRUCTORS = {
@@ -2349,6 +2388,13 @@ class YDB(Dialect):
             self.expression_to_alias = {}
             self.ydb_variables = {}
 
+        def identifier_sql(self, expression: exp.Identifier) -> str:
+            # Older SQLGlot versions do not escape identifier backslashes.
+            if "\\" in expression.name and "\\" not in getattr(self, "_identifier_escaped_sequences", {}):
+                expression = expression.copy()
+                expression.set("this", expression.name.replace("\\", "\\\\"))
+            return super().identifier_sql(expression)
+
         def create_sql(self, expression: exp.Create, pretty=True) -> str:
             """
             Generate SQL for CREATE expressions with special handling for CREATE VIEW.
@@ -2427,7 +2473,7 @@ class YDB(Dialect):
                     sql += f" AS {expression.alias}"
                 return _with_table_joins(sql)
             prefix = f"{expression.db}/" if expression.db else ""
-            sql = f"`{prefix}{expression.name}`"
+            sql = self.sql(exp.to_identifier(f"{prefix}{expression.name}", quoted=True))
 
             ydb_index_view = self.sql(expression, "ydb_index_view")
             if ydb_index_view:

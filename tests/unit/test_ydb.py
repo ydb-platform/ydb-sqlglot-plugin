@@ -1,7 +1,7 @@
 import importlib.metadata
 import unittest
 
-from sqlglot import ErrorLevel, ParseError, UnsupportedError, parse, parse_one
+from sqlglot import ErrorLevel, ParseError, UnsupportedError, exp, parse, parse_one
 from sqlglot.parser import logger as parser_logger
 
 from ydb_sqlglot.ydb import eliminate_join_marks, make_db_name_lower, table_names_to_lower_case
@@ -2106,10 +2106,56 @@ GROUP BY user, SessionWindow(ts, $init, $update, $calculate) AS session_start;""
         )
 
     def test_lexer_doc_backtick_identifier_escapes(self):
-        self.validate_identity(
+        expression = self.validate_identity(
             "SELECT 1 as `column with\\n newline, \\x0a newline and \\` backtick `",
-            write_sql="SELECT 1 AS `column with\n newline, \\x0a newline and `` backtick `",
+            write_sql="SELECT 1 AS `column with\n newline, \n newline and `` backtick `",
         )
+        self.assertEqual(expression.expressions[0].alias, "column with\n newline, \n newline and ` backtick ")
+
+    def test_backtick_identifier_escape_roundtrip(self):
+        cases = [
+            (r"hex\x41", "hexA"),
+            (r"hex\x5cn", r"hex\n"),
+            (r"octal\101", "octalA"),
+            (r"octal\134n", r"octal\n"),
+            (r"unicode\u0416", "unicodeЖ"),
+            (r"unicode\U0001f600", "unicode😀"),
+            (r"utf8\xc3\xa9", "utf8é"),
+            (r"колонка\x41", "колонкаA"),
+            (r"literal\\n", r"literal\n"),
+            (r"literal\\x0a", r"literal\x0a"),
+            (r"trailing\\", "trailing\\"),
+            (r"slash\\\`tick", "slash\\`tick"),
+            (r"doubled``tick", "doubled`tick"),
+            (r"unknown\q", "unknownq"),
+        ]
+        for escaped, name in cases:
+            with self.subTest(escaped=escaped):
+                expression = self.parse_one(f"SELECT 1 AS `{escaped}`")
+                self.assertEqual(expression.expressions[0].alias, name)
+                generated = expression.sql(dialect="ydb")
+                self.assertEqual(self.parse_one(generated).expressions[0].alias, name)
+                self.assertEqual(self.parse_one(generated).sql(dialect="ydb"), generated)
+
+    def test_postgres_identifier_backslashes(self):
+        for name in [r"literal\n", r"literal\x0a", "trailing\\", "slash\\`tick"]:
+            with self.subTest(name=name):
+                expression = parse_one(f'SELECT 1 AS "{name}"', read="postgres")
+                generated = expression.sql(dialect="ydb")
+                self.assertEqual(self.parse_one(generated).expressions[0].alias, name)
+
+    def test_table_identifier_escape_roundtrip(self):
+        cases = [
+            (r"literal\\n", r"literal\n"),
+            (r"literal\\x0a", r"literal\x0a"),
+            (r"table\`tick", "table`tick"),
+        ]
+        for escaped, name in cases:
+            with self.subTest(escaped=escaped):
+                expression = self.parse_one(f"SELECT * FROM `{escaped}`")
+                self.assertEqual(expression.find(exp.Table).name, name)
+                generated = expression.sql(dialect="ydb")
+                self.assertEqual(self.parse_one(generated), expression)
 
     def test_lexer_doc_ansi_double_quoted_identifier(self):
         self.validate_identity(
