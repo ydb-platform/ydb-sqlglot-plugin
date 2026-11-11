@@ -13,6 +13,7 @@ test suite without Docker is safe:
     pytest tests/                    # unit tests only (integration skipped)
     pytest tests/test_integration.py # integration tests only
 """
+import pytest
 import sqlglot
 
 
@@ -26,6 +27,39 @@ def transpile(sql: str, read: str = "sqlite") -> str:
 
 def test_connection(ydb_pool):
     ydb_pool.execute_with_retries("SELECT 1")
+
+
+@pytest.mark.parametrize("escaped, name", [
+    (r"column with\n newline, \x0a newline and \` backtick ", "column with\n newline, \n newline and ` backtick "),
+    (r"hex\x41", "hexA"),
+    (r"hex\x5cn", r"hex\n"),
+    (r"octal\101", "octalA"),
+    (r"octal\134n", r"octal\n"),
+    (r"unicode\u0416", "unicodeЖ"),
+    (r"unicode\U0001f600", "unicode😀"),
+    (r"utf8\xc3\xa9", "utf8é"),
+    (r"колонка\x41", "колонкаA"),
+    (r"literal\\n", r"literal\n"),
+    (r"literal\\x0a", r"literal\x0a"),
+    (r"trailing\\", "trailing\\"),
+    (r"slash\\\`tick", "slash\\`tick"),
+    (r"doubled``tick", "doubled`tick"),
+    (r"unknown\q", "unknownq"),
+])
+def test_ydb_identifier_escapes(ydb_pool, escaped, name):
+    source = f"SELECT 1 AS `{escaped}`"
+    generated = transpile(source, read="ydb")
+    for sql in (source, generated):
+        result = ydb_pool.execute_with_retries(sql)
+        assert result[0].columns[0].name == name
+        assert result[0].rows[0][0] == 1
+
+
+@pytest.mark.parametrize("name", [r"literal\n", r"literal\x0a", "trailing\\", "slash\\`tick"])
+def test_postgres_identifier_backslashes(ydb_pool, name):
+    generated = transpile(f'SELECT 1 AS "{name}"', read="postgres")
+    result = ydb_pool.execute_with_retries(generated)
+    assert result[0].columns[0].name == name
 
 
 # ---------------------------------------------------------------------------
