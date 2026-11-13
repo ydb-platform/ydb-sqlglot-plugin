@@ -65,14 +65,14 @@ cases. An unchecked item is a backlog item.
   - [x] [LIMIT OFFSET](https://ydb.tech/docs/en/yql/reference/syntax/select/limit_offset) - `test_limit_offset_doc_*`
   - [x] [SAMPLE / TABLESAMPLE](https://ydb.tech/docs/en/yql/reference/syntax/select/sample) - `test_sample_doc_*`
   - [x] [MATCH_RECOGNIZE](https://ydb.tech/docs/en/yql/reference/syntax/select/match_recognize) - `test_match_recognize_doc_*`
-- [ ] [VALUES](https://ydb.tech/docs/en/yql/reference/syntax/values)
+- [x] [VALUES](https://ydb.tech/docs/en/yql/reference/syntax/values) - `tests/unit/test_ydb_values.py`
 - [x] [CREATE TABLE](https://ydb.tech/docs/en/yql/reference/syntax/create_table/) - `test_create_table_doc_*`, `test_create_table_secondary_index_doc_*`, `test_create_table_family_doc_*`, TTL tests
-- [ ] [DROP TABLE](https://ydb.tech/docs/en/yql/reference/syntax/drop_table)
+- [x] [DROP TABLE](https://ydb.tech/docs/en/yql/reference/syntax/drop_table) - `test_drop_table_doc_example`
 - [x] [INSERT](https://ydb.tech/docs/en/yql/reference/syntax/insert_into) - `test_insert_into_doc_snippets`, `test_insert_into_external_file_doc_snippet` (skipped: external sources), pg→ydb DML coverage
 - [ ] [ALTER TABLE](https://ydb.tech/docs/en/yql/reference/syntax/alter_table/)
 - [x] [UPDATE](https://ydb.tech/docs/en/yql/reference/syntax/update) - `test_update_doc_*`, `test_update_on_doc_snippet`
-- [ ] [DELETE](https://ydb.tech/docs/en/yql/reference/syntax/delete)
-- [ ] [REPLACE](https://ydb.tech/docs/en/yql/reference/syntax/replace_into)
+- [x] [DELETE](https://ydb.tech/docs/en/yql/reference/syntax/delete) - `tests/unit/test_ydb_delete.py`
+- [x] [REPLACE](https://ydb.tech/docs/en/yql/reference/syntax/replace_into) - `tests/unit/test_ydb_replace.py`
 - [x] [UPSERT](https://ydb.tech/docs/en/yql/reference/syntax/upsert_into) - `test_upsert_into_doc_*`
 - [ ] [ACTION](https://ydb.tech/docs/en/yql/reference/syntax/action)
 - [ ] [INTO RESULT](https://ydb.tech/docs/en/yql/reference/syntax/into_result)
